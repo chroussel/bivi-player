@@ -13,6 +13,7 @@ pub mod subtitle_engine;
 pub mod player_state;
 pub mod format_detect;
 pub mod media_source;
+pub mod stream_loader;
 
 pub use demuxer::*;
 pub use frame_buffer::*;
@@ -25,3 +26,4 @@ pub use subtitle_engine::*;
 pub use player_state::*;
 pub use format_detect::*;
 pub use media_source::*;
+pub use stream_loader::*;

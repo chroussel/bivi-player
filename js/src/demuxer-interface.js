@@ -58,6 +58,7 @@ export class DemuxerInterface {
 
     // ── Streaming MKV ──
     pushData(data) { return this._inner.push_data?.(data) ?? false; }
+    pushChunk(data, fromSample) { return this._inner.push_chunk?.(data, fromSample) ?? fromSample; }
     headerReady() { return this._inner.header_ready?.() ?? true; }
     finish() { this._inner.finish?.(); }
 

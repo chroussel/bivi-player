@@ -1,6 +1,5 @@
-import wasmInit, { FrameBuffer, PlaybackClock, Renderer, SubtitleEngine, PlayerState, MediaSource, probe } from './pkg/videoplayer.js';
+import wasmInit, { FrameBuffer, PlaybackClock, Renderer, SubtitleEngine, PlayerState, MediaSource, StreamLoader, probe } from './pkg/videoplayer.js';
 export { wasmInit };
-import { StreamLoader } from './stream-loader.js';
 import { DemuxerInterface } from './demuxer-interface.js';
 
 export class HEVCPlayerCore {
@@ -50,18 +49,12 @@ export class HEVCPlayerCore {
         this.updateTime(0);
 
         this._setStatus('Connecting...');
-        this.streamLoader = new StreamLoader(url);
-        await this.streamLoader.init();
+        // Rust StreamLoader: HEAD + probe + moov detection all in Rust
+        this.streamLoader = await new StreamLoader(url);
 
-        // Rust detects format + creates the right demuxer
+        // Rust auto-detects format + creates demuxer
         const mediaSource = new MediaSource();
-        if (this.streamLoader.isMkv) {
-            mediaSource.init_mkv();
-            this._mkvDownloading = true;
-        } else {
-            mediaSource.init_mp4(this.streamLoader.moovData);
-            this.isStreaming = true;
-        }
+        mediaSource.init_from_bytes(this.streamLoader.moov_data());
         this.demuxer = new DemuxerInterface(mediaSource);
 
         this.demuxer.stillDownloading = true;
@@ -466,16 +459,19 @@ export class HEVCPlayerCore {
         if (this._fetchingData || !this.streamLoader) return;
         this._fetchingData = true;
         try {
-            const { done, nextSample } = await this.streamLoader.bufferMore(
-                this.demuxer, this._lastFetchedSample
-            );
-            this._lastFetchedSample = Math.max(this._lastFetchedSample, nextSample);
+            const chunk = await this.streamLoader.fetch_chunk();
+            if (chunk.length > 0) {
+                // Rust handles format-specific distribution (MKV push or MP4 sample cache)
+                this._lastFetchedSample = this.demuxer.pushChunk(chunk, this._lastFetchedSample);
+            }
+
             this.state.set_total_video_samples(this.demuxer.sampleCount());
             this.state.set_total_audio_samples(this.demuxer.audioSampleCount());
-            if (done) {
+
+            if (this.streamLoader.is_done()) {
+                this.demuxer.finish();
                 this.demuxer.stillDownloading = false;
                 this.state.set_still_downloading(false);
-                this._mkvDownloading = false;
                 if (this.demuxer.hasSubtitles()) this.loadSubtitles();
             }
         } finally {
