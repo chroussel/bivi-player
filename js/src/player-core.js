@@ -276,6 +276,7 @@ export class HEVCPlayerCore {
     }
 
     updateTime(elapsedMs) {
+        if (!this.session || !isFinite(elapsedMs)) return;
         const cur = Math.min(elapsedMs / 1000, this.session.duration_ms() / 1000);
         const tot = this.session.duration_ms() / 1000;
         if (this.dom.timeDisplay) this.dom.timeDisplay.textContent = `${fmtTime(cur)} / ${fmtTime(tot)}`;

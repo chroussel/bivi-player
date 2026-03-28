@@ -33,6 +33,9 @@ examples/lib:
 serve: all
 	cd examples && python3 server.py 8081
 
+test:
+	cd rust && cargo test --test unit_tests
+
 clean:
 	cd rust && cargo clean
 	rm -rf rust/pkg dist examples/lib
