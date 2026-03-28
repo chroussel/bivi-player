@@ -215,6 +215,11 @@ impl FrameBuffer {
         self.current.as_ref().map_or_else(Vec::new, |f| f.v.clone())
     }
 
+    /// After seek: skip frames with PTS before this value
+    pub fn set_skip_until(&mut self, pts: f64) {
+        self.last_shown_pts = pts - 1.0; // allow the frame at exactly pts
+    }
+
     pub fn reset(&mut self) {
         self.frames.clear();
         self.current = None;

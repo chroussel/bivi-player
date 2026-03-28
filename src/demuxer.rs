@@ -809,6 +809,36 @@ impl Demuxer {
         Some(Sample { is_sync: self.video.is_sync(i), timestamp_us, duration_us, data: sample_data })
     }
 
+    /// Find the video sample index of the keyframe at or before `target_us`.
+    pub fn find_keyframe_before(&self, target_us: f64) -> u32 {
+        let mut best = 0u32;
+        for i in 0..self.video.sample_count() {
+            if !self.video.is_sync(i) { continue; }
+            let timescale = self.video.timescale as f64;
+            let dts = self.v_dts_values[i] as f64;
+            let cts = if i < self.video.composition_offsets.len() {
+                self.video.composition_offsets[i] as f64
+            } else { 0.0 };
+            let pts = dts + cts - self.v_pts_offset;
+            let ts_us = (pts / timescale) * 1_000_000.0;
+            if ts_us <= target_us { best = i as u32; } else { break; }
+        }
+        best
+    }
+
+    /// Find the audio sample index at or before `target_us`.
+    pub fn find_audio_sample_at(&self, target_us: f64) -> u32 {
+        let a = match &self.audio { Some(a) => a, None => return 0 };
+        let timescale = a.timescale as f64;
+        let mut best = 0u32;
+        for i in 0..a.sample_count() {
+            let dts = self.a_dts_values[i] as f64;
+            let ts_us = (dts / timescale) * 1_000_000.0;
+            if ts_us <= target_us { best = i as u32; } else { break; }
+        }
+        best
+    }
+
     // ── Audio API ──
 
     pub fn has_audio(&self) -> bool { self.audio.is_some() }

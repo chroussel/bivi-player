@@ -11,6 +11,7 @@ const restartBtn = document.getElementById('restart-btn');
 const timeDisplay = document.getElementById('time');
 const fpsDisplay = document.getElementById('fps');
 const speedSelect = document.getElementById('speed');
+const seekbar = document.getElementById('seekbar');
 
 let player = null;
 // Toggle verbose logging: window.verbose = true in console
@@ -175,10 +176,13 @@ class HEVCPlayer {
             case 'decoded':
                 this.pendingDecodes -= msg.count;
                 if (msg.avgMs && window.verbose) console.log(`[perf] ${msg.count} samples, ${msg.frames} frames, avg ${msg.avgMs}ms/sample`);
-                if (this.clock.is_playing()) this.feedWorker();
+                if (this.clock.is_playing() || this._seekDecoding) this.feedWorker();
                 break;
             case 'flushed':
                 this.flushed = true;
+                break;
+            case 'ready':
+                if (this._seekTarget != null) this._onSeekReady();
                 break;
             case 'log':
                 console.log('[decoder]', msg.msg);
@@ -191,6 +195,7 @@ class HEVCPlayer {
     }
 
     feedWorker() {
+        if (this._seekTarget != null) return; // waiting for decoder reset
         if (this.pendingDecodes > 10) return;
         if (this.frameBuffer.len() > 30) return;
         if (this.nextSample >= this.totalSamples) {
@@ -312,6 +317,9 @@ class HEVCPlayer {
         const cur = Math.min(elapsedMs / 1000, this.durationMs / 1000);
         const tot = this.durationMs / 1000;
         timeDisplay.textContent = `${fmtTime(cur)} / ${fmtTime(tot)}`;
+        if (!this._seekDragging) {
+            seekbar.value = tot > 0 ? (cur / tot * 1000) : 0;
+        }
     }
 
     setSpeed(speed) {
@@ -321,6 +329,84 @@ class HEVCPlayer {
             this.audioAnchorElapsed = this.clock.elapsed_us(performance.now());
         }
         this.clock.set_speed(performance.now(), speed);
+    }
+
+    // ── Seek ──
+
+    seek(targetUs) {
+        const wasPlaying = this.clock.is_playing();
+        this._seekDecoding = false;
+        this.pause();
+
+        this.frameBuffer.reset();
+        this.flushed = false;
+        this.pendingDecodes = 0;
+        this.nextSample = this.demuxer.find_keyframe_before(targetUs);
+
+        // Reset audio
+        if (this.audioDecoder && this.audioDecoder.state !== 'closed') {
+            this.audioBufferQueue = [];
+            this.nextAudioSample = this.demuxer.find_audio_sample_at(targetUs);
+            this.audioDecoder.reset();
+            this.audioDecoder.configure({
+                codec: 'mp4a.40.2',
+                sampleRate: this.demuxer.audio_sample_rate(),
+                numberOfChannels: this.demuxer.audio_channel_count(),
+                description: this.demuxer.audio_codec_config(),
+            });
+        }
+
+        // Set clock to target position
+        const speed = this.clock.speed();
+        this.clock.reset();
+        this.clock.set_speed(0, speed);
+
+        this.updateTime(targetUs / 1000);
+        this.updateSubtitles(targetUs);
+
+        // Reset decoder and resume — wait for ready before feeding
+        const config = this.demuxer.codec_description();
+        this._seekTarget = targetUs;
+        this._seekResume = this._seekResumeOverride ?? wasPlaying;
+        this._seekResumeOverride = null;
+        this.worker.postMessage({ type: 'reset', config });
+        // 'ready' response handled in onWorkerMessage
+    }
+
+    _onSeekReady() {
+        const targetUs = this._seekTarget;
+        const speed = this.clock.speed();
+
+        // Set clock so elapsed = targetUs
+        this.clock.play(performance.now() - targetUs / 1000 / speed);
+        this.clock.pause(performance.now());
+
+        this._seekTarget = null;
+
+        if (this._seekResume) {
+            // Skip pre-target frames when resuming playback
+            this.frameBuffer.set_skip_until(this.clock.elapsed_us(performance.now()));
+            this.play();
+        } else {
+            // Paused seek: decode a few frames to show the target
+            this._seekDecoding = true;
+            this.feedWorker();
+            this._seekDecodeCheck();
+        }
+    }
+
+    _seekDecodeCheck() {
+        if (!this._seekDecoding) return;
+        // Show whatever frame is available (don't skip — we want the nearest keyframe)
+        if (this.frameBuffer.len() > 0) {
+            this.frameBuffer.pop_frame(Infinity, true);
+            this.renderer.render_current_frame(this.frameBuffer);
+            this._seekDecoding = false;
+            return;
+        }
+        // Not ready yet — feed more and retry
+        this.feedWorker();
+        requestAnimationFrame(() => this._seekDecodeCheck());
     }
 
     // ── Subtitles ──
@@ -569,10 +655,55 @@ speedSelect.addEventListener('change', () => {
     player?.setSpeed(parseFloat(speedSelect.value));
 });
 
+// Seekbar — pause on drag, seek live, resume on release
+let seekDebounce = null;
+let wasPlayingBeforeDrag = false;
+seekbar.addEventListener('mousedown', () => {
+    if (!player) return;
+    player._seekDragging = true;
+    wasPlayingBeforeDrag = player.clock.is_playing();
+    if (wasPlayingBeforeDrag) player.pause();
+});
+seekbar.addEventListener('touchstart', () => {
+    if (!player) return;
+    player._seekDragging = true;
+    wasPlayingBeforeDrag = player.clock.is_playing();
+    if (wasPlayingBeforeDrag) player.pause();
+});
+seekbar.addEventListener('input', () => {
+    if (!player) return;
+    const frac = seekbar.value / 1000;
+    const targetUs = frac * player.durationMs * 1000;
+    player.updateTime(targetUs / 1000);
+    player.updateSubtitles(targetUs);
+    clearTimeout(seekDebounce);
+    seekDebounce = setTimeout(() => player.seek(targetUs), 100);
+});
+seekbar.addEventListener('change', () => {
+    if (!player) return;
+    player._seekDragging = false;
+    clearTimeout(seekDebounce);
+    const frac = seekbar.value / 1000;
+    const targetUs = frac * player.durationMs * 1000;
+    // Force _seekResume based on pre-drag state
+    player._seekResumeOverride = wasPlayingBeforeDrag;
+    player.seek(targetUs);
+});
+
 document.addEventListener('keydown', (e) => {
     if (e.code === 'Space') {
         e.preventDefault();
         if (player?.clock?.is_playing()) player.pause();
         else player?.play();
+    }
+    if (e.code === 'ArrowRight' && player) {
+        e.preventDefault();
+        const cur = player.clock.elapsed_us(performance.now());
+        player.seek(cur + 10_000_000); // +10s
+    }
+    if (e.code === 'ArrowLeft' && player) {
+        e.preventDefault();
+        const cur = player.clock.elapsed_us(performance.now());
+        player.seek(Math.max(0, cur - 10_000_000)); // -10s
     }
 });

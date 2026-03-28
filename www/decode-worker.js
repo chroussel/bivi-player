@@ -36,22 +36,24 @@ function collectFrames() {
         const dv = new DataView(dec.HEAPU8.buffer, off, frameStructSize);
         const w = dv.getInt32(0, true);
         const h = dv.getInt32(4, true);
+        if (w <= 0 || h <= 0 || w > 7680 || h > 4320) continue; // skip bad frame
         const yPtr = dv.getUint32(24, true);
-        const yStride = dv.getInt32(28, true);
         const uPtr = dv.getUint32(32, true);
-        const uStride = dv.getInt32(36, true);
         const vPtr = dv.getUint32(40, true);
-        const vStride = dv.getInt32(44, true);
-        // Data is already 8-bit, stride-stripped by C wrapper
         const cw = w >> 1, ch = h >> 1;
-        const y = new Uint8Array(dec.HEAPU8.buffer, yPtr, w * h).slice();
-        const u = new Uint8Array(dec.HEAPU8.buffer, uPtr, cw * ch).slice();
-        const v = new Uint8Array(dec.HEAPU8.buffer, vPtr, cw * ch).slice();
-        postMessage({
-            type: 'frame',
-            pts: Number(dv.getBigInt64(16, true)),
-            w, h, y, u, v,
-        }, [y.buffer, u.buffer, v.buffer]);
+        try {
+            const y = new Uint8Array(dec.HEAPU8.buffer, yPtr, w * h).slice();
+            const u = new Uint8Array(dec.HEAPU8.buffer, uPtr, cw * ch).slice();
+            const v = new Uint8Array(dec.HEAPU8.buffer, vPtr, cw * ch).slice();
+            postMessage({
+                type: 'frame',
+                pts: Number(dv.getBigInt64(16, true)),
+                w, h, y, u, v,
+            }, [y.buffer, u.buffer, v.buffer]);
+        } catch (e) {
+            // Skip frame if allocation fails (GC pressure)
+            continue;
+        }
     }
     return count;
 }
@@ -102,7 +104,6 @@ onmessage = async (e) => {
                 break;
             case 'reset':
                 dec._codec_reset();
-                dec._codec_init();
                 if (msg.config) configure(msg.config);
                 postMessage({ type: 'ready' });
                 break;

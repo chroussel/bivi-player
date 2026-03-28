@@ -187,6 +187,23 @@ impl MkvDemuxer {
         ))
     }
 
+    pub fn find_keyframe_before(&self, target_us: f64) -> u32 {
+        let mut best = 0u32;
+        for (i, f) in self.video_frames.iter().enumerate() {
+            if !f.is_keyframe { continue; }
+            if f.timestamp_us <= target_us { best = i as u32; } else { break; }
+        }
+        best
+    }
+
+    pub fn find_audio_sample_at(&self, target_us: f64) -> u32 {
+        let mut best = 0u32;
+        for (i, f) in self.audio_frames.iter().enumerate() {
+            if f.timestamp_us <= target_us { best = i as u32; } else { break; }
+        }
+        best
+    }
+
     // ── Audio ──
 
     pub fn has_audio(&self) -> bool { self.audio_track.is_some() }
