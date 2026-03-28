@@ -1,0 +1,8 @@
+/target
+/pkg
+/www/pkg
+/www/decoder.js
+/www/decoder.wasm
+/www/data/*.mp4
+/www/data/*.mkv
+/vendor

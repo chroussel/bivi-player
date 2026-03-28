@@ -1,0 +1,92 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>HEVC Player</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            background: #111;
+            color: #eee;
+            font-family: system-ui, sans-serif;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            min-height: 100vh;
+            padding: 2rem;
+        }
+        h1 { margin-bottom: 1rem; font-size: 1.4rem; font-weight: 400; }
+        #drop-zone {
+            border: 2px dashed #444;
+            border-radius: 12px;
+            padding: 3rem 4rem;
+            text-align: center;
+            cursor: pointer;
+            transition: border-color 0.2s;
+            margin-bottom: 1rem;
+        }
+        #drop-zone.drag-over { border-color: #6cf; background: rgba(102,204,255,0.05); }
+        #drop-zone.loading {
+            border-color: #6cf;
+            animation: pulse 1s ease-in-out infinite;
+        }
+        @keyframes pulse {
+            0%, 100% { border-color: #6cf; background: rgba(102,204,255,0.03); }
+            50% { border-color: #4af; background: rgba(102,204,255,0.1); }
+        }
+        #drop-zone.hidden, .hidden { display: none; }
+        #file-input { display: none; }
+        #status { margin: 0.5rem 0; color: #999; font-size: 0.9rem; }
+        #player-container { display: none; flex-direction: column; align-items: center; }
+        #player-container.visible { display: flex; }
+        canvas {
+            max-width: 90vw;
+            max-height: 70vh;
+            background: #000;
+            border-radius: 4px;
+        }
+        #controls {
+            margin-top: 1rem;
+            display: flex;
+            gap: 1rem;
+            align-items: center;
+        }
+        button {
+            background: #333;
+            color: #eee;
+            border: 1px solid #555;
+            padding: 0.4rem 1.2rem;
+            border-radius: 6px;
+            cursor: pointer;
+            font-size: 0.9rem;
+        }
+        button:hover { background: #444; }
+        #time { font-size: 0.85rem; color: #999; }
+    </style>
+</head>
+<body>
+    <h1>HEVC Video Player</h1>
+
+    <label id="drop-zone" for="file-input">
+        Drop an HEVC .mp4 file here or click to browse
+        <input type="file" id="file-input" accept=".mp4,.m4v,.mov">
+    </label>
+    <button id="load-sample" style="margin-bottom:1rem">Load sample (hellmode12_2m.mp4)</button>
+
+    <div id="status"></div>
+
+    <div id="player-container">
+        <canvas id="canvas"></canvas>
+        <div id="controls">
+            <button id="play-btn">Play</button>
+            <button id="pause-btn">Pause</button>
+            <button id="restart-btn">Restart</button>
+            <span id="time">0:00 / 0:00</span>
+            <span id="fps" style="color:#6cf;font-size:0.85rem">0 fps</span>
+        </div>
+    </div>
+
+    <script type="module" src="player.js"></script>
+</body>
+</html>
