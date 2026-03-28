@@ -235,13 +235,13 @@ export class HEVCPlayerCore {
         }
         this.updateSubtitles(elapsedUs);
 
-        // Buffer ahead
+        // Buffer ahead — unified check
         if (!this._fetchingData && this._stillDownloading) {
+            const buffered = this.session.total_video_samples() - this.session.next_video_sample();
             const next = this.session.next_video_sample();
-            const lookAhead = Math.min(next + 240, this.session.total_video_samples());
-            if (lookAhead > next && !this.session.has_video_sample(lookAhead - 1)) {
-                this._bufferMore();
-            }
+            const needsFetch = buffered < 240 || (next + 240 < this.session.total_video_samples()
+                && !this.session.has_video_sample(next + 240));
+            if (needsFetch) this._bufferMore();
         }
 
         const MIN_REORDER = 3;
