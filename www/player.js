@@ -696,14 +696,23 @@ document.addEventListener('keydown', (e) => {
         if (player?.clock?.is_playing()) player.pause();
         else player?.play();
     }
-    if (e.code === 'ArrowRight' && player) {
+    if ((e.code === 'ArrowRight' || e.code === 'ArrowLeft') && player) {
         e.preventDefault();
-        const cur = player._seekTarget ?? player.clock.elapsed_us(performance.now());
-        player.seek(Math.min(cur + 10_000_000, player.durationMs * 1000));
-    }
-    if (e.code === 'ArrowLeft' && player) {
-        e.preventDefault();
-        const cur = player._seekTarget ?? player.clock.elapsed_us(performance.now());
-        player.seek(Math.max(0, cur - 10_000_000));
+        const delta = e.code === 'ArrowRight' ? 10_000_000 : -10_000_000;
+        if (!player._arrowSeekBase) {
+            player._arrowSeekBase = player._seekTarget ?? player.clock.elapsed_us(performance.now());
+            player._arrowSeekAccum = 0;
+        }
+        player._arrowSeekAccum += delta;
+        const target = Math.max(0, Math.min(
+            player._arrowSeekBase + player._arrowSeekAccum,
+            player.durationMs * 1000
+        ));
+        player.updateTime(target / 1000);
+        clearTimeout(player._arrowSeekTimer);
+        player._arrowSeekTimer = setTimeout(() => {
+            player._arrowSeekBase = null;
+            player.seek(target);
+        }, 300);
     }
 });
