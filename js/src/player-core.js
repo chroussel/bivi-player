@@ -96,6 +96,11 @@ export class HEVCPlayerCore {
         }
 
         this.populateTrackSelectors();
+
+        // Feed samples to get a thumbnail frame
+        this._wantThumbnail = true;
+        this.feedWorker();
+
         this._setStatus(this._getStatus().replace(/ — .*/, '') + ' — Ready');
     }
 
@@ -103,6 +108,12 @@ export class HEVCPlayerCore {
         switch (msg.type) {
             case 'frame': {
                 this.frameBuffer.push(msg.pts, msg.y, msg.u, msg.v, msg.w, msg.h);
+                // Show first frame as thumbnail
+                if (this._wantThumbnail && this.frameBuffer.len() > 0) {
+                    this.frameBuffer.pop_frame(Infinity, true);
+                    this.renderer.render_current_frame(this.frameBuffer);
+                    this._wantThumbnail = false;
+                }
                 break;
             }
             case 'decoded':
