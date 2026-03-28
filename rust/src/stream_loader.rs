@@ -48,7 +48,7 @@ pub struct StreamLoader {
     url: String,
     file_size: u64,
     format: ContainerFormat,
-    moov_data: Vec<u8>,
+    init_data: Vec<u8>,
     mkv_offset: u64,
     done: bool,
     last_fetched_sample: u32,
@@ -76,7 +76,7 @@ impl StreamLoader {
             url,
             file_size,
             format,
-            moov_data: Vec::new(),
+            init_data: Vec::new(),
             mkv_offset: probe_size as u64,
             done: false,
             last_fetched_sample: 0,
@@ -85,7 +85,7 @@ impl StreamLoader {
         match format {
             ContainerFormat::Mkv => {
                 // MKV: probe data will be pushed on first buffer_more
-                loader.moov_data = probe_data; // reuse as initial MKV data
+                loader.init_data = probe_data; // reuse as initial MKV data
             }
             ContainerFormat::Mp4 => {
                 // MP4: find moov box
@@ -109,11 +109,11 @@ impl StreamLoader {
                 // moov found — check if it fits in probe
                 let moov_end = pos as u64 + size;
                 if moov_end <= probe.len() as u64 {
-                    self.moov_data = probe[pos+8..moov_end as usize].to_vec();
+                    self.init_data = probe[pos+8..moov_end as usize].to_vec();
                 } else {
                     // Need to fetch the rest
                     let full = fetch_range(&self.url, pos as u64, moov_end).await?;
-                    self.moov_data = full[8..].to_vec();
+                    self.init_data = full[8..].to_vec();
                 }
                 return Ok(());
             }
@@ -126,7 +126,7 @@ impl StreamLoader {
             if hdr.len() >= 8 && &hdr[4..8] == b"moov" {
                 let moov_size = u32::from_be_bytes([hdr[0], hdr[1], hdr[2], hdr[3]]) as u64;
                 let full = fetch_range(&self.url, pos as u64, pos as u64 + moov_size).await?;
-                self.moov_data = full[8..].to_vec();
+                self.init_data = full[8..].to_vec();
                 return Ok(());
             }
         }
@@ -140,7 +140,7 @@ impl StreamLoader {
     pub fn is_mkv(&self) -> bool { self.format == ContainerFormat::Mkv }
     pub fn file_size(&self) -> f64 { self.file_size as f64 }
     pub fn is_done(&self) -> bool { self.done }
-    pub fn moov_data(&self) -> Vec<u8> { self.moov_data.clone() }
+    pub fn init_data(&self) -> Vec<u8> { self.init_data.clone() }
 
     /// Fetch next 1MB of data. For MKV: returns raw chunk. For MP4: distributes to demuxer.
     pub async fn fetch_chunk(&mut self) -> Result<Vec<u8>, JsValue> {

@@ -54,7 +54,7 @@ export class HEVCPlayerCore {
 
         // Rust auto-detects format + creates demuxer
         const mediaSource = new MediaSource();
-        mediaSource.init_from_bytes(this.streamLoader.moov_data());
+        mediaSource.init_from_bytes(this.streamLoader.init_data());
         this.demuxer = new DemuxerInterface(mediaSource);
 
         this.demuxer.stillDownloading = true;
