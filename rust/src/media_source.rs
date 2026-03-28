@@ -257,15 +257,17 @@ impl MediaSource {
     /// MP4 (distribute bytes to sample cache based on offsets).
     /// `from_sample` is used for MP4 to know where to start distributing.
     /// Returns the next sample index to fetch from.
-    pub fn push_chunk(&mut self, data: &[u8], from_sample: u32) -> u32 {
+    /// Push a fetched data chunk.
+    /// `file_offset`: the actual byte position in the file where `data` starts.
+    /// `from_sample`: which video sample index to start distributing from.
+    pub fn push_chunk(&mut self, data: &[u8], file_offset: u64, from_sample: u32) -> u32 {
         match &mut self.inner {
             Inner::Mkv(mkv) => {
                 mkv.push_data(data);
                 mkv.sample_count()
             }
             Inner::Mp4(mp4) => {
-                // Distribute bytes to MP4 sample cache
-                let start_off = mp4.video_sample_offset(from_sample) as u64;
+                let start_off = file_offset;
                 let end_off = start_off + data.len() as u64;
                 let v_count = mp4.sample_count();
                 let mut last = from_sample;

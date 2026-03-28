@@ -36,24 +36,23 @@ impl MediaSession {
     pub async fn buffer_more(&mut self) -> Result<bool, JsValue> {
         if self.loader.is_done() { return Ok(false); }
 
-        // For MP4: fetch from the next needed sample offset, not sequentially
-        let fetch_offset = match &self.source.inner {
+        // For MP4: fetch from sample offset. For MKV: sequential.
+        let (chunk, file_offset) = match &self.source.inner {
             crate::media_source::Inner::Mp4(mp4) => {
-                // Start from the sample's file offset (with 64KB backtrack for interleaved audio)
-                let off = mp4.video_sample_offset(self.last_fetched_sample) as u64;
-                if off > 0 { Some(off.saturating_sub(64 * 1024)) } else { None }
+                let sample_off = mp4.video_sample_offset(self.last_fetched_sample) as u64;
+                let fetch_start = sample_off.saturating_sub(64 * 1024);
+                let data = self.loader.fetch_range_at(fetch_start).await?;
+                (data, fetch_start)
             }
-            _ => None,
-        };
-
-        let chunk = if let Some(off) = fetch_offset {
-            self.loader.fetch_range_at(off).await?
-        } else {
-            self.loader.fetch_chunk().await?
+            _ => {
+                let off = self.loader.current_offset();
+                let data = self.loader.fetch_chunk().await?;
+                (data, off)
+            }
         };
 
         if !chunk.is_empty() {
-            self.last_fetched_sample = self.source.push_chunk(&chunk, self.last_fetched_sample);
+            self.last_fetched_sample = self.source.push_chunk(&chunk, file_offset, self.last_fetched_sample);
         }
         self.state.set_total_video_samples(self.source.sample_count());
         self.state.set_total_audio_samples(self.source.audio_sample_count());
