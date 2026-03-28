@@ -1,31 +1,37 @@
-.PHONY: all rust codecs hevc clean serve
+.PHONY: all rust codecs js clean serve
 
 EMCC_PATH ?= /usr/lib/emscripten
 export PATH := $(EMCC_PATH):$(PATH)
 
-all: rust codecs
+all: rust codecs js
 
-# ── Module A: Rust WASM (demuxer, frame buffer, clock, renderer) ──
+# ── Rust WASM ──
 
 rust:
-	wasm-pack build --target web --release
-	rm -rf www/pkg && cp -r pkg www/pkg
+	cd rust && wasm-pack build --target web --release
+	rm -rf dist/pkg && cp -r rust/pkg dist/pkg
 
-# ── Module B: Codec WASM (emscripten, implementing codec_api.h) ──
+# ── Codecs (emscripten) ──
 
 codecs: hevc
 
 hevc:
-	./codecs/hevc/build.sh
+	./rust/codecs/hevc/build.sh
 
-# ── Serve ──
+# ── JS library ──
+
+js:
+	cp js/src/*.js dist/
+	@# Worker needs to be in same directory as library
+	cp js/src/decode-worker.js dist/
+
+# ── Serve examples ──
 
 serve:
-	cd www && python3 server.py 8081
+	cd examples && python3 server.py 8081
 
 # ── Clean ──
 
 clean:
-	cargo clean
-	rm -rf pkg www/pkg
-	rm -f www/codec-*.js www/codec-*.wasm
+	cd rust && cargo clean
+	rm -rf rust/pkg dist

@@ -1,8 +1,12 @@
 #!/usr/bin/env python3
-"""HTTP server with COOP/COEP headers and Range request support."""
+"""Dev server — serves from project root with COOP/COEP + Range support."""
 import http.server
 import os
 import sys
+
+# Serve from project root (parent of examples/)
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+os.chdir(ROOT)
 
 class Handler(http.server.SimpleHTTPRequestHandler):
     def end_headers(self):
@@ -22,7 +26,6 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             return
 
         file_size = os.path.getsize(path)
-        # Parse "bytes=start-end"
         try:
             range_spec = range_header.replace("bytes=", "")
             parts = range_spec.split("-")
@@ -45,6 +48,6 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             f.seek(start)
             self.wfile.write(f.read(length))
 
-port = int(sys.argv[1]) if len(sys.argv) > 1 else 8080
-print(f"Serving on http://localhost:{port} (COOP/COEP + Range)")
+port = int(sys.argv[1]) if len(sys.argv) > 1 else 8081
+print(f"Serving {ROOT} on http://localhost:{port}")
 http.server.HTTPServer(("localhost", port), Handler).serve_forever()

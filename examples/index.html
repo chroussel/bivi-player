@@ -1,0 +1,38 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>HEVC Player Demo</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            background: #111; color: #eee;
+            font-family: system-ui, sans-serif;
+            display: flex; flex-direction: column; align-items: center;
+            min-height: 100vh; padding: 2rem;
+        }
+        h1 { margin-bottom: 1rem; font-size: 1.4rem; font-weight: 400; }
+        hevc-player { max-width: 90vw; max-height: 80vh; width: 1280px; }
+        .demos { margin-bottom: 1rem; display: flex; gap: 0.5rem; }
+        button {
+            background: #333; color: #eee; border: 1px solid #555;
+            padding: 0.4rem 1rem; border-radius: 6px; cursor: pointer;
+        }
+        button:hover { background: #444; }
+    </style>
+</head>
+<body>
+    <h1>HEVC Video Player</h1>
+
+    <div class="demos">
+        <button onclick="document.querySelector('hevc-player').loadUrl('examples/data/hellmode12_2m.mp4')">Load MP4</button>
+        <button onclick="document.querySelector('hevc-player').loadUrl('examples/data/hellmode12_2m.mkv')">Load MKV</button>
+        <button onclick="document.querySelector('hevc-player').streamUrl('examples/data/hellmode12_2m.mp4')">Stream MP4</button>
+    </div>
+
+    <hevc-player></hevc-player>
+
+    <script type="module" src="dist/hevc-player.js"></script>
+</body>
+</html>

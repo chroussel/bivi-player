@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 
 fn main() {
-    let libde265_dir: PathBuf = ["../../vendor/libde265/libde265"].iter().collect();
+    let libde265_dir: PathBuf = ["../../../vendor/libde265/libde265"].iter().collect();
 
     let sources: Vec<PathBuf> = std::fs::read_dir(&libde265_dir)
         .expect("can't read libde265 dir")
@@ -44,7 +44,7 @@ fn main() {
         .cpp(true)
         .std("c++17")
         .opt_level(3)
-        .include("../../vendor/libde265")
+        .include("../../../vendor/libde265")
         .define("HAVE_STDINT_H", None)
         .flag("-fno-exceptions")
         .flag("-nostdlib")

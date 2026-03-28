@@ -4,13 +4,13 @@ cd "$(dirname "$0")/../.."
 
 export PATH="/usr/lib/emscripten:$PATH"
 
-LIBDE265_DIR=vendor/libde265/libde265
+LIBDE265_DIR=../vendor/libde265/libde265
 SOURCES=$(ls $LIBDE265_DIR/*.cc | grep -v 'en265\|visualize\|image-io')
 
 echo "Building codec-hevc..."
 em++ -O3 -msimd128 \
   -pthread \
-  -I vendor/libde265 \
+  -I ../vendor/libde265 \
   -I codecs/include \
   -DHAVE_STDINT_H \
   -std=c++17 \
@@ -36,6 +36,6 @@ em++ -O3 -msimd128 \
   -s PTHREAD_POOL_SIZE=8 \
   $SOURCES \
   codecs/hevc/wrapper.c \
-  -o www/codec-hevc.js
+  -o ../dist/codec-hevc.js
 
-echo "Done: www/codec-hevc.js + www/codec-hevc.wasm"
+echo "Done: dist/codec-hevc.js + dist/codec-hevc.wasm"
