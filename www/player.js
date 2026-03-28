@@ -13,6 +13,8 @@ const fpsDisplay = document.getElementById('fps');
 const speedSelect = document.getElementById('speed');
 
 let player = null;
+// Toggle verbose logging: window.verbose = true in console
+window.verbose = false;
 
 class HEVCPlayer {
     constructor(canvas) {
@@ -172,7 +174,7 @@ class HEVCPlayer {
             }
             case 'decoded':
                 this.pendingDecodes -= msg.count;
-                if (msg.avgMs) console.log(`[perf] ${msg.count} samples, ${msg.frames} frames, avg ${msg.avgMs}ms/sample`);
+                if (msg.avgMs && window.verbose) console.log(`[perf] ${msg.count} samples, ${msg.frames} frames, avg ${msg.avgMs}ms/sample`);
                 if (this.clock.is_playing()) this.feedWorker();
                 break;
             case 'flushed':
