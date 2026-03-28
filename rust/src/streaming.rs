@@ -220,6 +220,44 @@ impl StreamingDemuxer {
     }
 
     /// Evict cached sample data outside [keep_start, keep_end) to free memory.
+    /// Distribute a fetched data chunk to the sample caches.
+    /// `file_offset`: where in the file `data` starts.
+    /// `from_sample`: first video sample to consider.
+    /// Returns next sample index to fetch from.
+    pub fn push_chunk(&mut self, data: &[u8], file_offset: u64, from_sample: u32) -> u32 {
+        let start_off = file_offset;
+        let end_off = start_off + data.len() as u64;
+        let v_count = self.video.sample_count() as u32;
+        let mut last = from_sample;
+
+        for i in from_sample..v_count {
+            let off = self.v_sample_offsets[i as usize];
+            let sz = self.video.sample_sizes[i as usize] as u64;
+            if off + sz > end_off { break; }
+            if off < start_off || sz == 0 { continue; }
+            if self.v_sample_cache[i as usize].is_some() { continue; }
+            let lo = (off - start_off) as usize;
+            self.v_sample_cache[i as usize] = Some(data[lo..lo + sz as usize].to_vec());
+            last = i + 1;
+        }
+
+        if let Some(ref audio) = self.audio {
+            let a_count = audio.sample_count();
+            for i in 0..a_count {
+                let off = self.a_sample_offsets[i];
+                if off >= end_off { break; }
+                if off < start_off { continue; }
+                let sz = audio.sample_sizes[i] as u64;
+                if sz == 0 || off + sz > end_off { continue; }
+                if self.a_sample_cache[i].is_some() { continue; }
+                let lo = (off - start_off) as usize;
+                self.a_sample_cache[i] = Some(data[lo..lo + sz as usize].to_vec());
+            }
+        }
+
+        last
+    }
+
     pub fn evict_samples(&mut self, keep_video_start: u32, keep_video_end: u32,
                          keep_audio_start: u32, keep_audio_end: u32) {
         for i in 0..self.v_sample_cache.len() {

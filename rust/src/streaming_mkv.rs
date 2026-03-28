@@ -160,6 +160,12 @@ impl StreamingMkvDemuxer {
 
     // ── Audio ──
 
+    /// Push chunk — for MKV, file_offset and from_sample are ignored (sequential parsing).
+    pub fn push_chunk(&mut self, data: &[u8], _file_offset: u64, _from_sample: u32) -> u32 {
+        self.push_data(data);
+        self.sample_count()
+    }
+
     pub fn has_audio(&self) -> bool { !self.audio_tracks.is_empty() }
     pub fn audio_track_count(&self) -> u32 { self.audio_tracks.len().max(if self.has_audio() { 1 } else { 0 }) as u32 }
     pub fn audio_track_info(&self, _index: u32) -> Option<crate::mkv::TrackInfo> { None } // TODO: track metadata

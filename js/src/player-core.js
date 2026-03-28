@@ -20,6 +20,7 @@ export class HEVCPlayerCore {
         this.audioAnchorElapsed = 0;
         // Streaming
         this._fetchingData = false;
+        this._stillDownloading = true;
         // Subtitles (Rust engine)
         this.subtitleEngine = null;
         this._lastSubCount = 0;
@@ -51,7 +52,7 @@ export class HEVCPlayerCore {
             const frames = this.session.sample_count();
             this._setStatus(`Buffering... ${frames} frames`);
             if (this.session.header_ready() && frames >= 30) break;
-            if (!this.session.still_downloading()) break;
+            if (!this._stillDownloading) break;
         }
 
         if (!this.session.header_ready()) throw new Error('Could not parse header');
@@ -234,7 +235,7 @@ export class HEVCPlayerCore {
         this.updateSubtitles(elapsedUs);
 
         // Buffer ahead
-        if (!this._fetchingData && this.session.still_downloading()) {
+        if (!this._fetchingData && this._stillDownloading) {
             const next = this.session.next_video_sample();
             const lookAhead = Math.min(next + 240, this.session.total_video_samples());
             if (lookAhead > next && !this.session.has_video_sample(lookAhead - 1)) {
@@ -264,7 +265,7 @@ export class HEVCPlayerCore {
         this.updateTime(elapsedUs / 1000);
 
         const done = this.session.flushed() && this.frameBuffer.len() === 0;
-        if (done && !this.session.still_downloading()) {
+        if (done && !this._stillDownloading) {
             this.clock.pause(now);
             this._setStatus(this._getStatus().replace(/ — .*/, '') + ' — Finished');
         } else {
@@ -331,7 +332,7 @@ export class HEVCPlayerCore {
         this.worker.postMessage({ type: 'reset', config });
 
         // Buffer if streaming
-        if (this.session.still_downloading()) {
+        if (this._stillDownloading) {
             this._bufferMore();
         }
     }
@@ -347,7 +348,7 @@ export class HEVCPlayerCore {
 
         if (this._seekResume) {
             this.frameBuffer.set_skip_until(this.clock.elapsed_us(performance.now()));
-            if (this.session.still_downloading()) this._bufferMore();
+            if (this._stillDownloading) this._bufferMore();
             this.play();
         } else {
             this._seekDecoding = true;
@@ -362,7 +363,7 @@ export class HEVCPlayerCore {
         // Update sample count (grows during streaming)
 
         // If no samples available at seek position, buffer more
-        while (this.session.still_downloading() && this.session.next_video_sample() >= this.session.total_video_samples()) {
+        while (this._stillDownloading && this.session.next_video_sample() >= this.session.total_video_samples()) {
             await this._bufferMore();
         }
 
@@ -384,6 +385,7 @@ export class HEVCPlayerCore {
         this._fetchingData = true;
         try {
             const more = await this.session.buffer_more();
+            this._stillDownloading = more;
             if (!more && this.session.has_subtitles()) {
                 this.loadSubtitles();
             }

@@ -253,53 +253,10 @@ impl MediaSource {
         if let Inner::Mp4(d) = &mut self.inner { d.evict_samples(vs, ve, as_, ae); }
     }
 
-    /// Push a fetched data chunk — handles both MKV (progressive parse) and
-    /// MP4 (distribute bytes to sample cache based on offsets).
-    /// `from_sample` is used for MP4 to know where to start distributing.
-    /// Returns the next sample index to fetch from.
-    /// Push a fetched data chunk.
-    /// `file_offset`: the actual byte position in the file where `data` starts.
-    /// `from_sample`: which video sample index to start distributing from.
     pub fn push_chunk(&mut self, data: &[u8], file_offset: u64, from_sample: u32) -> u32 {
         match &mut self.inner {
-            Inner::Mkv(mkv) => {
-                mkv.push_data(data);
-                mkv.sample_count()
-            }
-            Inner::Mp4(mp4) => {
-                let start_off = file_offset;
-                let end_off = start_off + data.len() as u64;
-                let v_count = mp4.sample_count();
-                let mut last = from_sample;
-
-                for i in from_sample..v_count {
-                    let off = mp4.video_sample_offset(i) as u64;
-                    let sz = mp4.video_sample_size(i) as u64;
-                    if off + sz > end_off { break; }
-                    if off < start_off || sz == 0 { continue; }
-                    if mp4.has_video_sample(i) { continue; }
-                    let lo = (off - start_off) as usize;
-                    mp4.set_video_sample_data(i, data[lo..lo + sz as usize].to_vec());
-                    last = i + 1;
-                }
-
-                // Audio
-                if mp4.has_audio() {
-                    let a_count = mp4.audio_sample_count();
-                    for i in 0..a_count {
-                        let off = mp4.audio_sample_offset(i) as u64;
-                        if off >= end_off { break; }
-                        if off < start_off { continue; }
-                        let sz = mp4.audio_sample_size(i) as u64;
-                        if sz == 0 || off + sz > end_off { continue; }
-                        if mp4.has_audio_sample(i) { continue; }
-                        let lo = (off - start_off) as usize;
-                        mp4.set_audio_sample_data(i, data[lo..lo + sz as usize].to_vec());
-                    }
-                }
-
-                last
-            }
+            Inner::Mkv(mkv) => mkv.push_chunk(data, file_offset, from_sample),
+            Inner::Mp4(mp4) => mp4.push_chunk(data, file_offset, from_sample),
             Inner::None => from_sample,
         }
     }
