@@ -33,21 +33,10 @@ select { background: #333; color: #eee; border: 1px solid #555; border-radius: 4
 .time { color: #999; }
 .fps { color: #6cf; }
 .status { color: #999; font-size: 0.85rem; padding: 0.3rem; text-align: center; }
-.drop-zone {
-    border: 2px dashed #444; border-radius: 12px; padding: 3rem;
-    text-align: center; cursor: pointer; color: #999; transition: border-color 0.2s;
-}
-.drop-zone:hover, .drop-zone.drag-over { border-color: #6cf; }
-.drop-zone.hidden { display: none; }
-input[type=file] { display: none; }
 `;
 
 const HTML = `
 <div class="container">
-    <label class="drop-zone" part="drop-zone">
-        Drop an HEVC .mp4/.mkv file or click to browse
-        <input type="file" accept=".mp4,.m4v,.mov,.mkv,.webm">
-    </label>
     <div class="status" part="status"></div>
     <div class="video-wrap">
         <canvas></canvas>
@@ -89,14 +78,11 @@ export class HevcPlayerElement extends HTMLElement {
             audioTrackSelect: this.shadowRoot.querySelector('.audio-track'),
             subTrackSelect: this.shadowRoot.querySelector('.sub-track'),
         };
-        this._dropZone = this.shadowRoot.querySelector('.drop-zone');
-        this._fileInput = this.shadowRoot.querySelector('input[type=file]');
         this._core = null;
 
         this._bindControls();
         this._bindSeekbar();
         this._bindKeyboard();
-        this._bindFilePicker();
     }
 
     connectedCallback() {
@@ -116,7 +102,6 @@ export class HevcPlayerElement extends HTMLElement {
         try {
             const buf = await file.arrayBuffer();
             await this._core.load(buf);
-            this._dropZone.classList.add('hidden');
         } catch (e) { this._el.status.textContent = `Error: ${e.message}`; console.error(e); }
     }
 
@@ -127,7 +112,6 @@ export class HevcPlayerElement extends HTMLElement {
             const resp = await fetch(url);
             if (!resp.ok) throw new Error(`${resp.status}`);
             await this._core.load(await resp.arrayBuffer());
-            this._dropZone.classList.add('hidden');
         } catch (e) { this._el.status.textContent = `Error: ${e.message}`; console.error(e); }
     }
 
@@ -135,7 +119,6 @@ export class HevcPlayerElement extends HTMLElement {
         await this._ensureCore();
         try {
             await this._core.loadStream(url);
-            this._dropZone.classList.add('hidden');
         } catch (e) { this._el.status.textContent = `Error: ${e.message}`; console.error(e); }
     }
 
@@ -218,19 +201,6 @@ export class HevcPlayerElement extends HTMLElement {
         });
     }
 
-    _bindFilePicker() {
-        this._dropZone.addEventListener('click', () => this._fileInput.click());
-        this._fileInput.addEventListener('change', (e) => {
-            if (e.target.files[0]) this.loadFile(e.target.files[0]);
-        });
-        this.addEventListener('dragover', (e) => { e.preventDefault(); this._dropZone.classList.add('drag-over'); });
-        this.addEventListener('dragleave', () => this._dropZone.classList.remove('drag-over'));
-        this.addEventListener('drop', (e) => {
-            e.preventDefault();
-            this._dropZone.classList.remove('drag-over');
-            if (e.dataTransfer?.files[0]) this.loadFile(e.dataTransfer.files[0]);
-        });
-    }
 }
 
 customElements.define('hevc-player', HevcPlayerElement);

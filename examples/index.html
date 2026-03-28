@@ -20,10 +20,21 @@
             padding: 0.4rem 1rem; border-radius: 6px; cursor: pointer;
         }
         button:hover { background: #444; }
+        .file-input {
+            border: 2px dashed #444; border-radius: 12px; padding: 2rem 3rem;
+            text-align: center; cursor: pointer; color: #999; margin-bottom: 1rem;
+            transition: border-color 0.2s; display: block;
+        }
+        .file-input:hover, .file-input.drag-over { border-color: #6cf; }
     </style>
 </head>
 <body>
     <h1>HEVC Video Player</h1>
+
+    <label class="file-input" for="file-picker">
+        Drop an HEVC .mp4/.mkv file here or click to browse
+        <input type="file" id="file-picker" accept=".mp4,.m4v,.mov,.mkv,.webm" style="display:none">
+    </label>
 
     <div class="demos">
         <button onclick="document.querySelector('hevc-player').loadUrl('data/hellmode12_2m.mp4')">Load MP4</button>
@@ -35,12 +46,18 @@
 
     <script type="module" src="lib/hevc-player.js"></script>
     <script>
-        // Forward page-level drops to the player
+        const player = document.querySelector('hevc-player');
+        const filePicker = document.getElementById('file-picker');
+
+        filePicker.addEventListener('change', e => {
+            if (e.target.files[0]) player.loadFile(e.target.files[0]);
+        });
+
         document.addEventListener('dragover', e => e.preventDefault());
         document.addEventListener('drop', e => {
             e.preventDefault();
             const file = e.dataTransfer?.files[0];
-            if (file) document.querySelector('hevc-player')?.loadFile(file);
+            if (file) player.loadFile(file);
         });
     </script>
 </body>
