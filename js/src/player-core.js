@@ -35,6 +35,7 @@ export class HEVCPlayerCore {
         // Subtitles
         this.subtitles = [];
         this.lastSubText = '';
+        this._lastSubCount = 0;
     }
 
     _setStatus(text) {
@@ -385,6 +386,12 @@ export class HEVCPlayerCore {
         const elapsedUs = this.clock.elapsed_us(now);
 
         this.scheduleAudio(elapsedUs);
+
+        // Reload subtitles if more arrived (streaming MKV)
+        if (this.demuxer.stillDownloading && this.demuxer.subtitleCount() > this._lastSubCount) {
+            this._lastSubCount = this.demuxer.subtitleCount();
+            this.loadSubtitles();
+        }
         this.updateSubtitles(elapsedUs);
 
         // Buffer ahead — unified for MP4 Range streaming + MKV progressive
@@ -501,6 +508,7 @@ export class HEVCPlayerCore {
 
         if (this._seekResume) {
             this.frameBuffer.set_skip_until(this.clock.elapsed_us(performance.now()));
+            if (this.demuxer.stillDownloading) this._bufferMore();
             this.play();
         } else {
             this._seekDecoding = true;
@@ -516,6 +524,12 @@ export class HEVCPlayerCore {
             this.renderer.render_current_frame(this.frameBuffer);
             this._seekDecoding = false;
             return;
+        }
+        // Update sample count (might have grown from streaming)
+        this.totalSamples = this.demuxer.sampleCount();
+        // Need more data? Trigger buffer fetch
+        if (this.demuxer.stillDownloading && this.nextSample >= this.totalSamples) {
+            this._bufferMore();
         }
         this.feedWorker();
         requestAnimationFrame(() => this._seekDecodeCheck());
