@@ -1,4 +1,4 @@
-import wasmInit, { Demuxer, MkvDemuxer, FrameBuffer, PlaybackClock, Renderer } from './pkg/videoplayer.js';
+import wasmInit, { Demuxer, MkvDemuxer, TrackInfo, FrameBuffer, PlaybackClock, Renderer } from './pkg/videoplayer.js';
 import { debounce, accumulatedDebounce } from './debounce.js';
 
 const dropZone = document.getElementById('drop-zone');
@@ -13,6 +13,8 @@ const timeDisplay = document.getElementById('time');
 const fpsDisplay = document.getElementById('fps');
 const speedSelect = document.getElementById('speed');
 const seekbar = document.getElementById('seekbar');
+const audioTrackSelect = document.getElementById('audio-track');
+const subTrackSelect = document.getElementById('sub-track');
 
 let player = null;
 // Toggle verbose logging: window.verbose = true in console
@@ -112,6 +114,9 @@ class HEVCPlayer {
         if (this.demuxer.has_subtitles?.()) {
             this.loadSubtitles();
         }
+
+        // Populate track selectors (MKV multi-track)
+        this.populateTrackSelectors();
 
         status.textContent = status.textContent.replace(/ — .*/, '') + ' — Ready';
     }
@@ -410,6 +415,76 @@ class HEVCPlayer {
         requestAnimationFrame(() => this._seekDecodeCheck());
     }
 
+    // ── Track selection ──
+
+    populateTrackSelectors() {
+        // Audio tracks
+        const audioCount = this.demuxer.audio_track_count?.() ?? (this.demuxer.has_audio() ? 1 : 0);
+        if (audioCount > 1) {
+            audioTrackSelect.innerHTML = '';
+            for (let i = 0; i < audioCount; i++) {
+                const info = this.demuxer.audio_track_info?.(i);
+                const label = info ? `${info.language}${info.name ? ' — ' + info.name : ''}` : `Track ${i + 1}`;
+                audioTrackSelect.add(new Option(label, i));
+            }
+            audioTrackSelect.style.display = '';
+        } else {
+            audioTrackSelect.style.display = 'none';
+        }
+
+        // Subtitle tracks
+        const subCount = this.demuxer.subtitle_track_count?.() ?? (this.demuxer.has_subtitles?.() ? 1 : 0);
+        if (subCount > 0) {
+            subTrackSelect.innerHTML = '';
+            subTrackSelect.add(new Option('Subs off', -1));
+            for (let i = 0; i < subCount; i++) {
+                const info = this.demuxer.subtitle_track_info?.(i);
+                const label = info ? `${info.language}${info.name ? ' — ' + info.name : ''}` : `Track ${i + 1}`;
+                subTrackSelect.add(new Option(label, i));
+            }
+            subTrackSelect.value = '0'; // default first track on
+            subTrackSelect.style.display = '';
+        } else {
+            subTrackSelect.style.display = 'none';
+        }
+    }
+
+    switchAudioTrack(index) {
+        if (!this.demuxer.set_audio_track) return;
+        this.demuxer.set_audio_track(index);
+
+        // Re-init audio decoder with new track config
+        if (this.audioDecoder && this.audioDecoder.state !== 'closed') {
+            this.audioBufferQueue = [];
+            this.audioDecoder.reset();
+            this.audioDecoder.configure({
+                codec: 'mp4a.40.2',
+                sampleRate: this.demuxer.audio_sample_rate(),
+                numberOfChannels: this.demuxer.audio_channel_count(),
+                description: this.demuxer.audio_codec_config(),
+            });
+            this.nextAudioSample = this.demuxer.find_audio_sample_at(
+                this.clock.elapsed_us(performance.now())
+            );
+            this.totalAudioSamples = this.demuxer.audio_sample_count();
+        }
+    }
+
+    switchSubtitleTrack(index) {
+        if (index < 0) {
+            // Subs off
+            this.subtitles = [];
+            if (this.subtitleEl) this.subtitleEl.innerHTML = '';
+            this.lastSubText = '';
+            return;
+        }
+        if (this.demuxer.set_subtitle_track) {
+            this.demuxer.set_subtitle_track(index);
+        }
+        this.loadSubtitles();
+        this.updateSubtitles(this.clock.elapsed_us(performance.now()));
+    }
+
     // ── Subtitles ──
 
     loadSubtitles() {
@@ -654,6 +729,14 @@ restartBtn.addEventListener('click', () => player?.restart());
 
 speedSelect.addEventListener('change', () => {
     player?.setSpeed(parseFloat(speedSelect.value));
+});
+
+audioTrackSelect.addEventListener('change', () => {
+    player?.switchAudioTrack(parseInt(audioTrackSelect.value));
+});
+
+subTrackSelect.addEventListener('change', () => {
+    player?.switchSubtitleTrack(parseInt(subTrackSelect.value));
 });
 
 // Seekbar — pause on drag, seek live, resume on release

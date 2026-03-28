@@ -4,27 +4,6 @@ use wasm_bindgen::prelude::*;
 
 use crate::demuxer::Sample;
 
-#[wasm_bindgen]
-pub struct MkvDemuxer {
-    data: Vec<u8>,
-    // Track metadata
-    video_track: u64,
-    audio_track: Option<u64>,
-    subtitle_track: Option<u64>,
-    video_codec_private: Vec<u8>,
-    audio_codec_private: Vec<u8>,
-    subtitle_header: String,
-    width: u32,
-    height: u32,
-    sample_rate: u32,
-    channel_count: u16,
-    // Pre-read all frames into sorted lists
-    video_frames: Vec<FrameData>,
-    audio_frames: Vec<FrameData>,
-    subtitle_events: Vec<SubtitleEvent>,
-    duration_ms: f64,
-}
-
 struct FrameData {
     timestamp_us: f64,
     duration_us: f64,
@@ -49,8 +28,67 @@ impl SubtitleEvent {
     pub fn text(&self) -> String { self.text.clone() }
 }
 
-fn find_track(tracks: &[TrackEntry], track_type: TrackType) -> Option<&TrackEntry> {
-    tracks.iter().find(|t| t.track_type() == track_type)
+/// Metadata for a selectable track
+#[wasm_bindgen]
+pub struct TrackInfo {
+    name: String,
+    language: String,
+    codec: String,
+}
+
+#[wasm_bindgen]
+impl TrackInfo {
+    #[wasm_bindgen(getter)]
+    pub fn name(&self) -> String { self.name.clone() }
+    #[wasm_bindgen(getter)]
+    pub fn language(&self) -> String { self.language.clone() }
+    #[wasm_bindgen(getter)]
+    pub fn codec(&self) -> String { self.codec.clone() }
+}
+
+struct AudioTrackData {
+    track_id: u64,
+    sample_rate: u32,
+    channel_count: u16,
+    codec_config: Vec<u8>,
+    name: String,
+    language: String,
+    codec_id: String,
+    frames: Vec<FrameData>,
+}
+
+struct SubtitleTrackData {
+    track_id: u64,
+    header: String,
+    name: String,
+    language: String,
+    codec_id: String,
+    events: Vec<SubtitleEvent>,
+}
+
+#[wasm_bindgen]
+pub struct MkvDemuxer {
+    // Video (single track)
+    video_track: u64,
+    video_codec_private: Vec<u8>,
+    width: u32,
+    height: u32,
+    video_frames: Vec<FrameData>,
+    duration_ms: f64,
+    // Multiple audio tracks
+    audio_tracks: Vec<AudioTrackData>,
+    selected_audio: usize,
+    // Multiple subtitle tracks
+    subtitle_tracks: Vec<SubtitleTrackData>,
+    selected_subtitle: usize,
+}
+
+fn track_info_from(t: &TrackEntry) -> (String, String, String) {
+    (
+        t.name().unwrap_or("").to_string(),
+        t.language().unwrap_or("und").to_string(),
+        t.codec_id().to_string(),
+    )
 }
 
 #[wasm_bindgen]
@@ -65,8 +103,8 @@ impl MkvDemuxer {
 
         let tracks = mkv.tracks().to_vec();
 
-        // Find video track
-        let video_entry = find_track(&tracks, TrackType::Video)
+        // Video track (first one)
+        let video_entry = tracks.iter().find(|t| t.track_type() == TrackType::Video)
             .ok_or_else(|| JsValue::from_str("No video track"))?;
         let video_track = video_entry.track_number().get();
         let video_codec_private = video_entry.codec_private().unwrap_or(&[]).to_vec();
@@ -74,68 +112,74 @@ impl MkvDemuxer {
             .map(|v| (v.pixel_width().get() as u32, v.pixel_height().get() as u32))
             .unwrap_or((0, 0));
 
-        // Find audio track
-        let audio_entry = find_track(&tracks, TrackType::Audio);
-        let audio_track = audio_entry.map(|t| t.track_number().get());
-        let audio_codec_private = audio_entry
-            .and_then(|t| t.codec_private())
-            .unwrap_or(&[]).to_vec();
-        let (sample_rate, channel_count) = audio_entry
-            .and_then(|t| t.audio())
-            .map(|a| (a.sampling_frequency() as u32, a.channels().get() as u16))
-            .unwrap_or((0, 0));
+        // All audio tracks
+        let mut audio_tracks: Vec<AudioTrackData> = Vec::new();
+        for t in tracks.iter().filter(|t| t.track_type() == TrackType::Audio) {
+            let (name, language, codec_id) = track_info_from(t);
+            let (sr, ch) = t.audio()
+                .map(|a| (a.sampling_frequency() as u32, a.channels().get() as u16))
+                .unwrap_or((0, 0));
+            audio_tracks.push(AudioTrackData {
+                track_id: t.track_number().get(),
+                sample_rate: sr,
+                channel_count: ch,
+                codec_config: t.codec_private().unwrap_or(&[]).to_vec(),
+                name, language, codec_id,
+                frames: Vec::new(),
+            });
+        }
 
-        // Find subtitle track
-        let subtitle_entry = find_track(&tracks, TrackType::Subtitle);
-        let subtitle_track = subtitle_entry.map(|t| t.track_number().get());
-        let subtitle_header = subtitle_entry
-            .and_then(|t| t.codec_private())
-            .map(|b| String::from_utf8_lossy(b).to_string())
-            .unwrap_or_default();
+        // All subtitle tracks
+        let mut subtitle_tracks: Vec<SubtitleTrackData> = Vec::new();
+        for t in tracks.iter().filter(|t| t.track_type() == TrackType::Subtitle) {
+            let (name, language, codec_id) = track_info_from(t);
+            let header = t.codec_private()
+                .map(|b| String::from_utf8_lossy(b).to_string())
+                .unwrap_or_default();
+            subtitle_tracks.push(SubtitleTrackData {
+                track_id: t.track_number().get(),
+                header, name, language, codec_id,
+                events: Vec::new(),
+            });
+        }
 
+        // Build track ID lookup maps
+        let audio_ids: Vec<u64> = audio_tracks.iter().map(|a| a.track_id).collect();
+        let sub_ids: Vec<u64> = subtitle_tracks.iter().map(|s| s.track_id).collect();
+
+        // Duration
         let timescale_ns = mkv.info().timestamp_scale().get();
-
-        // Duration: raw value is in TimecodeScale units → multiply to get ns → convert to ms
         let duration_ms = mkv.info().duration()
             .map(|d| d * timescale_ns as f64 / 1_000_000.0)
             .unwrap_or(0.0);
 
         // Read all frames
         let mut video_frames = Vec::new();
-        let mut audio_frames = Vec::new();
-        let mut subtitle_events = Vec::new();
-
         let mut frame = Frame::default();
         while mkv.next_frame(&mut frame)
             .map_err(|e| JsValue::from_str(&format!("MKV frame error: {}", e)))?
         {
             let ts_us = (frame.timestamp as f64 * timescale_ns as f64) / 1_000.0;
-            // Duration in microseconds (if available, from block duration)
             let dur_us = frame.duration
                 .map(|d| (d as f64 * timescale_ns as f64) / 1_000.0)
                 .unwrap_or(0.0);
 
             if frame.track == video_track {
                 video_frames.push(FrameData {
-                    timestamp_us: ts_us,
-                    duration_us: dur_us,
+                    timestamp_us: ts_us, duration_us: dur_us,
                     data: std::mem::take(&mut frame.data),
                     is_keyframe: frame.is_keyframe.unwrap_or(false),
                 });
-            } else if Some(frame.track) == audio_track {
-                audio_frames.push(FrameData {
-                    timestamp_us: ts_us,
-                    duration_us: dur_us,
+            } else if let Some(idx) = audio_ids.iter().position(|&id| id == frame.track) {
+                audio_tracks[idx].frames.push(FrameData {
+                    timestamp_us: ts_us, duration_us: dur_us,
                     data: std::mem::take(&mut frame.data),
                     is_keyframe: true,
                 });
-            } else if Some(frame.track) == subtitle_track {
-                // ASS/SSA subtitle data in MKV is the dialogue line (after the header fields)
+            } else if let Some(idx) = sub_ids.iter().position(|&id| id == frame.track) {
                 let text = String::from_utf8_lossy(&frame.data).to_string();
-                subtitle_events.push(SubtitleEvent {
-                    start_us: ts_us,
-                    duration_us: dur_us,
-                    text,
+                subtitle_tracks[idx].events.push(SubtitleEvent {
+                    start_us: ts_us, duration_us: dur_us, text,
                 });
                 frame.data.clear();
             } else {
@@ -144,21 +188,10 @@ impl MkvDemuxer {
         }
 
         Ok(MkvDemuxer {
-            data,
-            video_track,
-            audio_track,
-            subtitle_track,
-            video_codec_private,
-            audio_codec_private,
-            subtitle_header,
-            width,
-            height,
-            sample_rate,
-            channel_count,
-            video_frames,
-            audio_frames,
-            subtitle_events,
-            duration_ms,
+            video_track, video_codec_private, width, height,
+            video_frames, duration_ms,
+            audio_tracks, selected_audio: 0,
+            subtitle_tracks, selected_subtitle: 0,
         })
     }
 
@@ -168,7 +201,6 @@ impl MkvDemuxer {
     pub fn height(&self) -> u32 { self.height }
     pub fn sample_count(&self) -> u32 { self.video_frames.len() as u32 }
     pub fn duration_ms(&self) -> f64 { self.duration_ms }
-
     pub fn codec_description(&self) -> Vec<u8> { self.video_codec_private.clone() }
 
     pub fn nal_length_size(&self) -> u8 {
@@ -179,12 +211,7 @@ impl MkvDemuxer {
 
     pub fn read_sample(&self, index: u32) -> Option<Sample> {
         let f = self.video_frames.get(index as usize)?;
-        Some(Sample::new(
-            f.is_keyframe,
-            f.timestamp_us,
-            f.duration_us,
-            f.data.clone(),
-        ))
+        Some(Sample::new(f.is_keyframe, f.timestamp_us, f.duration_us, f.data.clone()))
     }
 
     pub fn find_keyframe_before(&self, target_us: f64) -> u32 {
@@ -196,39 +223,74 @@ impl MkvDemuxer {
         best
     }
 
+    // ── Audio (multi-track) ──
+
+    pub fn has_audio(&self) -> bool { !self.audio_tracks.is_empty() }
+    pub fn audio_track_count(&self) -> u32 { self.audio_tracks.len() as u32 }
+
+    pub fn audio_track_info(&self, index: u32) -> Option<TrackInfo> {
+        let t = self.audio_tracks.get(index as usize)?;
+        Some(TrackInfo { name: t.name.clone(), language: t.language.clone(), codec: t.codec_id.clone() })
+    }
+
+    pub fn set_audio_track(&mut self, index: u32) { self.selected_audio = index as usize; }
+
+    pub fn audio_sample_rate(&self) -> u32 {
+        self.audio_tracks.get(self.selected_audio).map_or(0, |a| a.sample_rate)
+    }
+
+    pub fn audio_channel_count(&self) -> u16 {
+        self.audio_tracks.get(self.selected_audio).map_or(0, |a| a.channel_count)
+    }
+
+    pub fn audio_codec_config(&self) -> Vec<u8> {
+        self.audio_tracks.get(self.selected_audio)
+            .map_or_else(Vec::new, |a| a.codec_config.clone())
+    }
+
+    pub fn audio_sample_count(&self) -> u32 {
+        self.audio_tracks.get(self.selected_audio).map_or(0, |a| a.frames.len() as u32)
+    }
+
+    pub fn read_audio_sample(&self, index: u32) -> Option<Sample> {
+        let a = self.audio_tracks.get(self.selected_audio)?;
+        let f = a.frames.get(index as usize)?;
+        Some(Sample::new(true, f.timestamp_us, f.duration_us, f.data.clone()))
+    }
+
     pub fn find_audio_sample_at(&self, target_us: f64) -> u32 {
+        let a = match self.audio_tracks.get(self.selected_audio) { Some(a) => a, None => return 0 };
         let mut best = 0u32;
-        for (i, f) in self.audio_frames.iter().enumerate() {
+        for (i, f) in a.frames.iter().enumerate() {
             if f.timestamp_us <= target_us { best = i as u32; } else { break; }
         }
         best
     }
 
-    // ── Audio ──
+    // ── Subtitles (multi-track) ──
 
-    pub fn has_audio(&self) -> bool { self.audio_track.is_some() }
-    pub fn audio_sample_rate(&self) -> u32 { self.sample_rate }
-    pub fn audio_channel_count(&self) -> u16 { self.channel_count }
-    pub fn audio_codec_config(&self) -> Vec<u8> { self.audio_codec_private.clone() }
-    pub fn audio_sample_count(&self) -> u32 { self.audio_frames.len() as u32 }
+    pub fn has_subtitles(&self) -> bool { !self.subtitle_tracks.is_empty() }
+    pub fn subtitle_track_count(&self) -> u32 { self.subtitle_tracks.len() as u32 }
 
-    pub fn read_audio_sample(&self, index: u32) -> Option<Sample> {
-        let f = self.audio_frames.get(index as usize)?;
-        Some(Sample::new(true, f.timestamp_us, f.duration_us, f.data.clone()))
+    pub fn subtitle_track_info(&self, index: u32) -> Option<TrackInfo> {
+        let t = self.subtitle_tracks.get(index as usize)?;
+        Some(TrackInfo { name: t.name.clone(), language: t.language.clone(), codec: t.codec_id.clone() })
     }
 
-    // ── Subtitles ──
+    pub fn set_subtitle_track(&mut self, index: u32) { self.selected_subtitle = index as usize; }
 
-    pub fn has_subtitles(&self) -> bool { self.subtitle_track.is_some() }
-    pub fn subtitle_header(&self) -> String { self.subtitle_header.clone() }
-    pub fn subtitle_count(&self) -> u32 { self.subtitle_events.len() as u32 }
+    pub fn subtitle_header(&self) -> String {
+        self.subtitle_tracks.get(self.selected_subtitle)
+            .map_or_else(String::new, |s| s.header.clone())
+    }
+
+    pub fn subtitle_count(&self) -> u32 {
+        self.subtitle_tracks.get(self.selected_subtitle).map_or(0, |s| s.events.len() as u32)
+    }
 
     pub fn subtitle_event(&self, index: u32) -> Option<SubtitleEvent> {
-        let e = self.subtitle_events.get(index as usize)?;
-        Some(SubtitleEvent {
-            start_us: e.start_us,
-            duration_us: e.duration_us,
-            text: e.text.clone(),
-        })
+        let s = self.subtitle_tracks.get(self.selected_subtitle)?;
+        let e = s.events.get(index as usize)?;
+        Some(SubtitleEvent { start_us: e.start_us, duration_us: e.duration_us, text: e.text.clone() })
     }
 }
