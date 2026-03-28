@@ -35,7 +35,23 @@ impl MediaSession {
     /// Fetch next 1MB chunk and push to demuxer. Returns true if more data available.
     pub async fn buffer_more(&mut self) -> Result<bool, JsValue> {
         if self.loader.is_done() { return Ok(false); }
-        let chunk = self.loader.fetch_chunk().await?;
+
+        // For MP4: fetch from the next needed sample offset, not sequentially
+        let fetch_offset = match &self.source.inner {
+            crate::media_source::Inner::Mp4(mp4) => {
+                // Start from the sample's file offset (with 64KB backtrack for interleaved audio)
+                let off = mp4.video_sample_offset(self.last_fetched_sample) as u64;
+                if off > 0 { Some(off.saturating_sub(64 * 1024)) } else { None }
+            }
+            _ => None,
+        };
+
+        let chunk = if let Some(off) = fetch_offset {
+            self.loader.fetch_range_at(off).await?
+        } else {
+            self.loader.fetch_chunk().await?
+        };
+
         if !chunk.is_empty() {
             self.last_fetched_sample = self.source.push_chunk(&chunk, self.last_fetched_sample);
         }

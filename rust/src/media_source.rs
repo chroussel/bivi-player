@@ -57,7 +57,7 @@ pub fn probe(data: &[u8]) -> ProbeResult {
     }
 }
 
-enum Inner {
+pub(crate) enum Inner {
     Mp4(StreamingDemuxer),
     Mkv(StreamingMkvDemuxer),
     None,
@@ -65,7 +65,7 @@ enum Inner {
 
 #[wasm_bindgen]
 pub struct MediaSource {
-    inner: Inner,
+    pub(crate) inner: Inner,
 }
 
 #[wasm_bindgen]

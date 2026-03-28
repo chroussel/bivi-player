@@ -159,6 +159,18 @@ impl StreamLoader {
         Ok(data)
     }
 
+    /// Fetch 1MB starting from a specific byte offset.
+    pub async fn fetch_range_at(&mut self, offset: u64) -> Result<Vec<u8>, JsValue> {
+        let chunk_size = 1024 * 1024u64;
+        let start = offset;
+        let end = (start + chunk_size).min(self.file_size);
+        if start >= self.file_size {
+            self.done = true;
+            return Ok(Vec::new());
+        }
+        fetch_range(&self.url, start, end).await
+    }
+
     /// Fetch a specific byte range.
     pub async fn fetch_range_bytes(&self, start: f64, end: f64) -> Result<Vec<u8>, JsValue> {
         fetch_range(&self.url, start as u64, end as u64).await
