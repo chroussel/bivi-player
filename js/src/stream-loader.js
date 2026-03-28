@@ -9,11 +9,14 @@ export class StreamLoader {
         this.moovData = null;
     }
 
-    async init() {
-        // HEAD to get file size
+    async initHead() {
         const head = await fetch(this.url, { method: 'HEAD' });
         this.fileSize = parseInt(head.headers.get('Content-Length') || '0');
         if (!this.fileSize) throw new Error('Cannot determine file size');
+    }
+
+    async init() {
+        await this.initHead();
 
         // Fetch first 64KB — should contain ftyp + moov for faststart files
         let moovData = await this.fetchRange(0, Math.min(65536, this.fileSize));

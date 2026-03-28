@@ -113,29 +113,26 @@ export class HEVCPlayerCore {
         this.frameBuffer = new FrameBuffer(50, 3);
         this.clock = new PlaybackClock();
 
+        // Reuse StreamLoader for Range requests
         this._setStatus('Streaming MKV...');
+        this.streamLoader = new StreamLoader(url);
+        await this.streamLoader.initHead(); // just HEAD, no moov scan
         this.demuxer = new StreamingMkvDemuxer();
         this.isMkv = true;
+        this._mkvFetchOffset = 0;
 
-        // Stream data progressively via ReadableStream
-        const resp = await fetch(url);
-        if (!resp.ok) throw new Error(`Fetch failed: ${resp.status}`);
-        const total = parseInt(resp.headers.get('Content-Length') || '0');
-        const reader = resp.body.getReader();
-
-        // Read chunks until we have header + some video frames
-        let headerReady = false;
-        while (true) {
-            const { done, value } = await reader.read();
-            if (done) break;
-            headerReady = this.demuxer.push_data(value);
+        // Fetch 1MB chunks until we have header + enough frames
+        while (this._mkvFetchOffset < this.streamLoader.fileSize) {
+            const end = Math.min(this._mkvFetchOffset + 1024 * 1024, this.streamLoader.fileSize);
+            const chunk = await this.streamLoader.fetchRange(this._mkvFetchOffset, end);
+            this._mkvFetchOffset = end;
+            this.demuxer.push_data(chunk);
             const frames = this.demuxer.sample_count();
             this._setStatus(`Buffering... ${frames} frames`);
-            // Need header + at least 30 frames (~1s) to start
-            if (headerReady && frames >= 30) break;
+            if (this.demuxer.header_ready() && frames >= 30) break;
         }
 
-        if (!headerReady) throw new Error('Could not parse MKV header');
+        if (!this.demuxer.header_ready()) throw new Error('Could not parse MKV header');
 
         this.canvas.width = this.demuxer.width();
         this.canvas.height = this.demuxer.height();
@@ -146,22 +143,18 @@ export class HEVCPlayerCore {
         this._setStatus(`Video: ${this.demuxer.width()}x${this.demuxer.height()}, ${(this.durationMs / 1000).toFixed(1)}s (streaming MKV)`);
 
         await this._initDecoder();
-
         await this._postInit();
 
-        // Start background download AFTER init (avoids borrow conflict)
-        this._mkvReader = reader;
         this._mkvDownloading = true;
         this._downloadMkvBackground();
     }
 
     async _downloadMkvBackground() {
-        const reader = this._mkvReader;
-        while (true) {
-            const { done, value } = await reader.read();
-            if (done) break;
-            this.demuxer.push_data(value);
-            // Update total sample count as new frames are parsed
+        while (this._mkvFetchOffset < this.streamLoader.fileSize) {
+            const end = Math.min(this._mkvFetchOffset + 1024 * 1024, this.streamLoader.fileSize);
+            const chunk = await this.streamLoader.fetchRange(this._mkvFetchOffset, end);
+            this._mkvFetchOffset = end;
+            this.demuxer.push_data(chunk);
             this.totalSamples = this.demuxer.sample_count();
             this.totalAudioSamples = this.demuxer.audio_sample_count();
         }
@@ -170,7 +163,6 @@ export class HEVCPlayerCore {
         this.totalAudioSamples = this.demuxer.audio_sample_count();
         this._mkvDownloading = false;
 
-        // Reload subtitles now that all data is available
         if (this.demuxer.has_subtitles?.()) {
             this.loadSubtitles();
         }
