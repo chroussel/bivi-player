@@ -34,5 +34,14 @@
     <hevc-player></hevc-player>
 
     <script type="module" src="lib/hevc-player.js"></script>
+    <script>
+        // Forward page-level drops to the player
+        document.addEventListener('dragover', e => e.preventDefault());
+        document.addEventListener('drop', e => {
+            e.preventDefault();
+            const file = e.dataTransfer?.files[0];
+            if (file) document.querySelector('hevc-player')?.loadFile(file);
+        });
+    </script>
 </body>
 </html>
