@@ -360,12 +360,10 @@ export class HEVCPlayerCore {
         if (!this._seekDecoding) return;
 
         // Update sample count (grows during streaming)
-        this.session.set_total_video_samples(this.session.sample_count());
 
         // If no samples available at seek position, buffer more
         while (this.session.still_downloading() && this.session.next_video_sample() >= this.session.total_video_samples()) {
             await this._bufferMore();
-            this.session.set_total_video_samples(this.session.sample_count());
         }
 
         this.feedWorker();
@@ -445,7 +443,6 @@ export class HEVCPlayerCore {
             this.session.set_next_audio_sample(this.session.find_audio_sample_at(
                 this.clock.elapsed_us(performance.now())
             ));
-            this.session.set_total_audio_samples(this.session.audio_sample_count());
         }
     }
 
@@ -489,7 +486,6 @@ export class HEVCPlayerCore {
     // ── Audio ──
 
     async initAudio() {
-        this.session.set_total_audio_samples(this.session.audio_sample_count());
         if (this.session.total_audio_samples() === 0) return;
 
         this.audioCtx = new AudioContext({
