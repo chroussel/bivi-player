@@ -1,6 +1,7 @@
 /rust/target
 /target
 /rust/pkg
+/pkg
 /dist
 /vendor
 /examples/data/*.mp4
