@@ -9,14 +9,25 @@ static const uint8_t start_code[] = {0, 0, 0, 1};
 static codec_frame_t pending[CODEC_MAX_FRAMES];
 static int num_pending = 0;
 
-/* Implemented in Rust codec-wrapper */
-extern void codec_ring_store(
-    const uint8_t* y, const uint8_t* u, const uint8_t* v,
-    int y_stride, int u_stride, int v_stride,
-    int w, int h, int bpp,
-    uint32_t* out_y, uint32_t* out_u, uint32_t* out_v
-);
+/* Ring buffer for stable plane copies */
+#define NUM_SLOTS 32
+#define MAX_Y (3840 * 2160)
+#define MAX_C (1920 * 1080)
+static uint8_t* ring_y[NUM_SLOTS];
+static uint8_t* ring_u[NUM_SLOTS];
+static uint8_t* ring_v[NUM_SLOTS];
+static int ring_idx = 0;
+static int ring_init = 0;
 
+static void ensure_ring(void) {
+    if (ring_init) return;
+    for (int i = 0; i < NUM_SLOTS; i++) {
+        ring_y[i] = (uint8_t*)malloc(MAX_Y);
+        ring_u[i] = (uint8_t*)malloc(MAX_C);
+        ring_v[i] = (uint8_t*)malloc(MAX_C);
+    }
+    ring_init = 1;
+}
 
 int codec_init(void) {
     ctx = de265_new_decoder();
@@ -35,31 +46,24 @@ void codec_reset(void) {
 
 int codec_configure(const uint8_t* data, int len) {
     if (!ctx || len < 23) return -1;
-    int pos = 22;
+    int pos = 22, count = 0;
     int num_arrays = data[pos++];
-    int count = 0;
-
     for (int a = 0; a < num_arrays && pos + 3 <= len; a++) {
         pos++;
-        int num_nalus = (data[pos] << 8) | data[pos + 1];
-        pos += 2;
+        int num_nalus = (data[pos] << 8) | data[pos + 1]; pos += 2;
         for (int n = 0; n < num_nalus && pos + 2 <= len; n++) {
-            int nalu_len = (data[pos] << 8) | data[pos + 1];
-            pos += 2;
+            int nalu_len = (data[pos] << 8) | data[pos + 1]; pos += 2;
             if (pos + nalu_len > len) break;
             de265_push_data(ctx, start_code, 4, 0, NULL);
             de265_push_data(ctx, data + pos, nalu_len, 0, NULL);
             de265_push_end_of_NAL(ctx);
-            count++;
-            pos += nalu_len;
+            count++; pos += nalu_len;
         }
     }
-    /* Process parameter sets */
     int more = 1;
     while (more > 0) {
         de265_error err = de265_decode(ctx, &more);
-        if (err == DE265_ERROR_WAITING_FOR_INPUT_DATA) break;
-        if (err != DE265_OK) break;
+        if (err == DE265_ERROR_WAITING_FOR_INPUT_DATA || err != DE265_OK) break;
     }
     return count;
 }
@@ -83,8 +87,7 @@ int codec_push_sample(const uint8_t* data, int len, int nal_length_size, int64_t
 }
 
 int codec_flush(void) {
-    if (!ctx) return -1;
-    return (int)de265_flush_data(ctx);
+    return ctx ? (int)de265_flush_data(ctx) : -1;
 }
 
 int codec_decode(void) {
@@ -98,6 +101,7 @@ int codec_decode(void) {
 
 int codec_collect_frames(void) {
     if (!ctx) return 0;
+    ensure_ring();
     num_pending = 0;
     const struct de265_image* img;
     while (num_pending < CODEC_MAX_FRAMES && (img = de265_get_next_picture(ctx)) != NULL) {
@@ -105,28 +109,46 @@ int codec_collect_frames(void) {
         f->w = de265_get_image_width(img, 0);
         f->h = de265_get_image_height(img, 0);
         f->bpp = de265_get_bits_per_pixel(img, 0);
-        f->pix_fmt = 0; /* always YUV420 from libde265 */
+        f->pix_fmt = 0;
         f->pts = de265_get_image_PTS(img);
 
         int y_stride, u_stride, v_stride;
         const uint8_t* y = de265_get_image_plane(img, 0, &y_stride);
         const uint8_t* u = de265_get_image_plane(img, 1, &u_stride);
         const uint8_t* v = de265_get_image_plane(img, 2, &v_stride);
-        int cw = f->w >> 1;
-        int ch = f->h >> 1;
+        int cw = f->w >> 1, ch = f->h >> 1;
 
-        /* Rust ring buffer handles 10-bit→8-bit + stride stripping */
-        uint32_t out_y, out_u, out_v;
-        codec_ring_store(y, u, v, y_stride, u_stride, v_stride,
-                         f->w, f->h, f->bpp, &out_y, &out_u, &out_v);
+        int slot = ring_idx;
+        ring_idx = (ring_idx + 1) % NUM_SLOTS;
+
+        if (f->bpp > 8) {
+            int shift = f->bpp - 8;
+            for (int r = 0; r < f->h; r++) {
+                const uint16_t* src = (const uint16_t*)(y + r * y_stride);
+                uint8_t* dst = ring_y[slot] + r * f->w;
+                for (int c = 0; c < f->w; c++) dst[c] = src[c] >> shift;
+            }
+            for (int r = 0; r < ch; r++) {
+                const uint16_t* su = (const uint16_t*)(u + r * u_stride);
+                const uint16_t* sv = (const uint16_t*)(v + r * v_stride);
+                for (int c = 0; c < cw; c++) {
+                    ring_u[slot][r * cw + c] = su[c] >> shift;
+                    ring_v[slot][r * cw + c] = sv[c] >> shift;
+                }
+            }
+        } else {
+            for (int r = 0; r < f->h; r++)
+                memcpy(ring_y[slot] + r * f->w, y + r * y_stride, f->w);
+            for (int r = 0; r < ch; r++) {
+                memcpy(ring_u[slot] + r * cw, u + r * u_stride, cw);
+                memcpy(ring_v[slot] + r * cw, v + r * v_stride, cw);
+            }
+        }
 
         f->bpp = 8;
-        f->plane0_ptr = out_y;
-        f->plane0_stride = f->w;
-        f->plane1_ptr = out_u;
-        f->plane1_stride = cw;
-        f->plane2_ptr = out_v;
-        f->plane2_stride = cw;
+        f->plane0_ptr = (uint32_t)(uintptr_t)ring_y[slot]; f->plane0_stride = f->w;
+        f->plane1_ptr = (uint32_t)(uintptr_t)ring_u[slot]; f->plane1_stride = cw;
+        f->plane2_ptr = (uint32_t)(uintptr_t)ring_v[slot]; f->plane2_stride = cw;
         num_pending++;
     }
     return num_pending;

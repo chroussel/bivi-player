@@ -29,7 +29,6 @@ class HEVCPlayer {
         this.rafId = null;
         this.pendingDecodes = 0;
         this.flushed = false;
-        this.sharedMemory = null;
     }
 
     async load(arrayBuffer) {
@@ -61,7 +60,6 @@ class HEVCPlayer {
             this.worker.onmessage = (e) => {
                 if (e.data.type === 'ready') {
                     clearTimeout(timeout);
-                    if (e.data.sharedMemory) this.sharedMemory = e.data.sharedMemory;
                     resolve();
                 }
                 if (e.data.type === 'error') console.error('[decoder]', e.data.msg);
@@ -119,16 +117,10 @@ class HEVCPlayer {
             this.worker.onmessage = (e) => {
                 const msg = e.data;
                 if (msg.type === 'frame') {
-                    const mem = new Uint8Array(this.sharedMemory);
-                    this.frameBuffer.push_raw(
-                        msg.pts, mem,
-                        msg.plane0Ptr, msg.plane0Stride,
-                        msg.plane1Ptr, msg.plane1Stride,
-                        msg.plane2Ptr, msg.plane2Stride,
-                        msg.w, msg.h, 8,
-                    );
+                    this.frameBuffer.push(msg.pts, msg.y, msg.u, msg.v, msg.w, msg.h);
                     this.frameBuffer.pop_frame(Infinity, true);
                     this.renderer.render_current_frame(this.frameBuffer);
+
                     clearTimeout(timeout);
                     this.worker.onmessage = prevHandler;
                     resolve();
@@ -150,16 +142,7 @@ class HEVCPlayer {
     onWorkerMessage(msg) {
         switch (msg.type) {
             case 'frame': {
-                // C wrapper outputs 8-bit, stride=width into stable buffers
-                // Rust reads directly from shared memory — no JS copy
-                const mem = new Uint8Array(this.sharedMemory);
-                this.frameBuffer.push_raw(
-                    msg.pts, mem,
-                    msg.plane0Ptr, msg.plane0Stride,
-                    msg.plane1Ptr, msg.plane1Stride,
-                    msg.plane2Ptr, msg.plane2Stride,
-                    msg.w, msg.h, 8,
-                );
+                this.frameBuffer.push(msg.pts, msg.y, msg.u, msg.v, msg.w, msg.h);
                 break;
             }
             case 'decoded':

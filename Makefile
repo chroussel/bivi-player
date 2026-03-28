@@ -5,13 +5,13 @@ export PATH := $(EMCC_PATH):$(PATH)
 
 all: rust codecs
 
-# ── Rust WASM (demuxer + player core) ──
+# ── Module A: Rust WASM (demuxer, frame buffer, clock, renderer) ──
 
 rust:
 	wasm-pack build --target web --release
-	cp -r pkg www/pkg
+	rm -rf www/pkg && cp -r pkg www/pkg
 
-# ── Codecs ──
+# ── Module B: Codec WASM (emscripten, implementing codec_api.h) ──
 
 codecs: hevc
 

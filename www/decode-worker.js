@@ -1,4 +1,4 @@
-/* Generic codec worker — loads any codec WASM implementing codec_api.h */
+/* Generic codec worker — loads emscripten codec WASM implementing codec_api.h */
 
 const CODECS = {
     hevc: () => import('./codec-hevc.js'),
@@ -34,20 +34,24 @@ function collectFrames() {
     for (let i = 0; i < count; i++) {
         const off = base + i * frameStructSize;
         const dv = new DataView(dec.HEAPU8.buffer, off, frameStructSize);
+        const w = dv.getInt32(0, true);
+        const h = dv.getInt32(4, true);
+        const yPtr = dv.getUint32(24, true);
+        const yStride = dv.getInt32(28, true);
+        const uPtr = dv.getUint32(32, true);
+        const uStride = dv.getInt32(36, true);
+        const vPtr = dv.getUint32(40, true);
+        const vStride = dv.getInt32(44, true);
+        // Data is already 8-bit, stride-stripped by C wrapper
+        const cw = w >> 1, ch = h >> 1;
+        const y = new Uint8Array(dec.HEAPU8.buffer, yPtr, w * h).slice();
+        const u = new Uint8Array(dec.HEAPU8.buffer, uPtr, cw * ch).slice();
+        const v = new Uint8Array(dec.HEAPU8.buffer, vPtr, cw * ch).slice();
         postMessage({
             type: 'frame',
-            w:      dv.getInt32(0, true),
-            h:      dv.getInt32(4, true),
-            bpp:    dv.getInt32(8, true),
-            pixFmt: dv.getInt32(12, true),
-            pts:    Number(dv.getBigInt64(16, true)),
-            plane0Ptr:    dv.getUint32(24, true),
-            plane0Stride: dv.getInt32(28, true),
-            plane1Ptr:    dv.getUint32(32, true),
-            plane1Stride: dv.getInt32(36, true),
-            plane2Ptr:    dv.getUint32(40, true),
-            plane2Stride: dv.getInt32(44, true),
-        });
+            pts: Number(dv.getBigInt64(16, true)),
+            w, h, y, u, v,
+        }, [y.buffer, u.buffer, v.buffer]);
     }
     return count;
 }
@@ -69,8 +73,6 @@ function decodeSample(data, nalLengthSize, pts) {
     return { frames, ms: performance.now() - t0 };
 }
 
-const ready = {};
-
 onmessage = async (e) => {
     try {
         const msg = e.data;
@@ -78,7 +80,7 @@ onmessage = async (e) => {
             case 'init':
                 await init(msg.codec);
                 configure(msg.config);
-                postMessage({ type: 'ready', sharedMemory: dec.HEAPU8.buffer });
+                postMessage({ type: 'ready' });
                 break;
             case 'samples': {
                 let frames = 0, ms = 0;
