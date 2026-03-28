@@ -131,55 +131,51 @@ export class StreamLoader {
     async fetchChunk(demuxer, fromVideoSample) {
         const CHUNK_SIZE = 1024 * 1024; // 1MB
 
-        // Find the file offset of the first uncached video sample
-        let startOff = demuxer.video_sample_offset(fromVideoSample);
-        if (startOff <= 0) return;
+        let startOff = demuxer.videoSampleOffset(fromVideoSample);
+        if (startOff <= 0) return fromVideoSample;
 
-        // Expand start backward slightly to catch interleaved audio before the video sample
-        startOff = Math.max(0, startOff - 64 * 1024); // 64KB before
+        // Expand start backward to catch interleaved audio
+        startOff = Math.max(0, startOff - 64 * 1024);
         const endOff = Math.min(startOff + CHUNK_SIZE, this.fileSize);
 
         const data = await this.fetchRange(startOff, endOff);
 
-        // Distribute to video samples that fall within this range
-        const vCount = demuxer.sample_count();
+        // Distribute to video samples
+        const vCount = demuxer.sampleCount();
         let lastVideoIdx = fromVideoSample;
         for (let i = fromVideoSample; i < vCount; i++) {
-            const off = demuxer.video_sample_offset(i);
-            const sz = demuxer.video_sample_size(i);
+            const off = demuxer.videoSampleOffset(i);
+            const sz = demuxer.videoSampleSize(i);
             if (off + sz > endOff) break;
             if (off < startOff || sz === 0) continue;
-            if (demuxer.has_video_sample(i)) continue;
-            demuxer.set_video_sample_data(i, data.slice(off - startOff, off - startOff + sz));
+            if (demuxer.hasVideoSample(i)) continue;
+            demuxer.setVideoSampleData(i, data.slice(off - startOff, off - startOff + sz));
             lastVideoIdx = i;
         }
 
-        // Distribute to audio samples that fall within this range
-        // Use binary-ish search: find audio sample near our time, scan around it
-        if (demuxer.has_audio()) {
-            const aCount = demuxer.audio_sample_count();
-            // Find first audio sample near the current video sample's timestamp
-            const vSample = demuxer.read_sample(fromVideoSample);
+        // Distribute to audio samples
+        if (demuxer.hasAudio()) {
+            const aCount = demuxer.audioSampleCount();
+            const vSample = demuxer.readSample(fromVideoSample);
             const pts = vSample ? vSample.timestamp_us : 0;
-            let aStart = demuxer.find_audio_sample_at(pts);
-            // Scan backward to catch any before startOff
+            let aStart = demuxer.findAudioSampleAt(pts);
             aStart = Math.max(0, aStart - 50);
             for (let i = aStart; i < aCount; i++) {
-                const off = demuxer.audio_sample_offset(i);
+                const off = demuxer.audioSampleOffset(i);
                 if (off >= endOff) break;
                 if (off < startOff) continue;
-                const sz = demuxer.audio_sample_size(i);
+                const sz = demuxer.audioSampleSize(i);
                 if (sz === 0 || off + sz > endOff) continue;
-                if (demuxer.has_audio_sample(i)) continue;
-                demuxer.set_audio_sample_data(i, data.slice(off - startOff, off - startOff + sz));
+                if (demuxer.hasAudioSample(i)) continue;
+                demuxer.setAudioSampleData(i, data.slice(off - startOff, off - startOff + sz));
             }
         }
 
-        // Evict old samples (keep 30s behind)
+        // Evict old samples
         const keepStart = Math.max(0, fromVideoSample - 720);
-        demuxer.evict_samples(keepStart, lastVideoIdx + 1, 0, demuxer.audio_sample_count());
+        demuxer.evictSamples(keepStart, lastVideoIdx + 1, 0, demuxer.audioSampleCount());
 
-        return lastVideoIdx + 1; // next sample to fetch
+        return lastVideoIdx + 1;
     }
 
     /**

@@ -53,6 +53,7 @@ export class HEVCPlayerCore {
         this.renderer = new Renderer(this.canvas);
         this.frameBuffer = new FrameBuffer(50, 3);
         this.clock = new PlaybackClock();
+        this.updateTime(0);
 
         this._setStatus('Parsing container...');
         const data = new Uint8Array(arrayBuffer);
@@ -78,6 +79,7 @@ export class HEVCPlayerCore {
         this.renderer = new Renderer(this.canvas);
         this.frameBuffer = new FrameBuffer(50, 3);
         this.clock = new PlaybackClock();
+        this.updateTime(0);
 
         this._setStatus('Fetching headers...');
         this.streamLoader = new StreamLoader(url);
@@ -114,6 +116,7 @@ export class HEVCPlayerCore {
         this.renderer = new Renderer(this.canvas);
         this.frameBuffer = new FrameBuffer(50, 3);
         this.clock = new PlaybackClock();
+        this.updateTime(0);
 
         // Reuse StreamLoader for Range requests
         this._setStatus('Streaming MKV...');
@@ -550,11 +553,9 @@ export class HEVCPlayerCore {
         this._fetchingData = true;
         try {
             if (this._mkvDownloading) {
-                // MKV: fetch next 1MB chunk
                 await this._downloadMkvChunk();
-            } else if (this.isStreaming) {
-                // MP4: fetch next 1MB of sample data
-                const nextIdx = await this.streamLoader.fetchChunk(this.demuxer._inner, this._lastFetchedSample);
+            } else if (this.isStreaming && this.streamLoader) {
+                const nextIdx = await this.streamLoader.fetchChunk(this.demuxer, this._lastFetchedSample);
                 this._lastFetchedSample = Math.max(this._lastFetchedSample, nextIdx);
             }
         } finally {
@@ -768,6 +769,10 @@ export class HEVCPlayerCore {
         if (this.audioDecoder) { this.audioDecoder.close(); this.audioDecoder = null; }
         if (this.audioCtx) { this.audioCtx.close(); this.audioCtx = null; }
         this.renderer = null;
+        this.streamLoader = null;
+        this.isStreaming = false;
+        this._mkvDownloading = false;
+        this._fetchingData = false;
     }
 }
 
