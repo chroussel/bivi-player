@@ -33,8 +33,15 @@ examples/lib:
 serve: all
 	cd examples && python3 server.py 8081
 
-test:
+.PHONY: test test-unit test-e2e
+
+test: test-unit test-e2e
+
+test-unit:
 	cd rust && cargo test --test unit_tests
+
+test-e2e: all
+	cd tests/e2e && npx playwright test
 
 clean:
 	cd rust && cargo clean
