@@ -692,6 +692,12 @@ pub struct Sample {
     data: Vec<u8>,
 }
 
+impl Sample {
+    pub fn new(is_sync: bool, timestamp_us: f64, duration_us: f64, data: Vec<u8>) -> Self {
+        Sample { is_sync, timestamp_us, duration_us, data }
+    }
+}
+
 #[wasm_bindgen]
 impl Sample {
     #[wasm_bindgen(getter)]

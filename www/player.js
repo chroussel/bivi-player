@@ -1,4 +1,4 @@
-import wasmInit, { Demuxer, FrameBuffer, PlaybackClock, Renderer } from './pkg/videoplayer.js';
+import wasmInit, { Demuxer, MkvDemuxer, FrameBuffer, PlaybackClock, Renderer } from './pkg/videoplayer.js';
 
 const dropZone = document.getElementById('drop-zone');
 const fileInput = document.getElementById('file-input');
@@ -37,6 +37,10 @@ class HEVCPlayer {
         this.audioBufferQueue = []; // { pts, audioBuffer }
         this.audioScheduledUntil = 0;
         this.audioStartOffset = 0;
+        // Subtitles
+        this.subtitles = [];
+        this.subtitleEl = document.getElementById('subtitles');
+        this.lastSubText = '';
     }
 
     async load(arrayBuffer) {
@@ -47,9 +51,12 @@ class HEVCPlayer {
         this.frameBuffer = new FrameBuffer(50, 3);
         this.clock = new PlaybackClock();
 
-        status.textContent = 'Parsing MP4...';
+        status.textContent = 'Parsing container...';
         const data = new Uint8Array(arrayBuffer);
-        this.demuxer = new Demuxer(data);
+        // Detect format: MKV starts with 0x1A45DFA3 (EBML), MP4 has 'ftyp' at offset 4
+        const isMkv = data[0] === 0x1A && data[1] === 0x45 && data[2] === 0xDF && data[3] === 0xA3;
+        this.demuxer = isMkv ? new MkvDemuxer(data) : new Demuxer(data);
+        this.isMkv = isMkv;
 
         this.canvas.width = this.demuxer.width();
         this.canvas.height = this.demuxer.height();
@@ -95,6 +102,11 @@ class HEVCPlayer {
         // Init audio if available
         if (this.demuxer.has_audio() && typeof AudioDecoder !== 'undefined') {
             await this.initAudio();
+        }
+
+        // Load subtitles if available (MKV only)
+        if (this.demuxer.has_subtitles?.()) {
+            this.loadSubtitles();
         }
 
         status.textContent = status.textContent.replace(/ — .*/, '') + ' — Ready';
@@ -264,6 +276,7 @@ class HEVCPlayer {
         const elapsedUs = this.clock.elapsed_us(now);
 
         this.scheduleAudio(elapsedUs);
+        this.updateSubtitles(elapsedUs);
 
         // Pop next displayable frame from Rust buffer
         if (this.frameBuffer.pop_frame(elapsedUs, this.flushed)) {
@@ -303,6 +316,52 @@ class HEVCPlayer {
         if (this.audioCtx) {
             this.audioScheduledUntil = 0;
             this.audioBufferQueue = [];
+        }
+    }
+
+    // ── Subtitles ──
+
+    loadSubtitles() {
+        const count = this.demuxer.subtitle_count();
+        this.subtitles = [];
+        for (let i = 0; i < count; i++) {
+            const evt = this.demuxer.subtitle_event(i);
+            if (!evt) continue;
+            // Parse ASS dialogue: strip ASS formatting tags, extract text
+            let text = evt.text;
+            // ASS dialogue format: Layer,Start,End,Style,Name,MarginL,MarginR,MarginV,Effect,Text
+            // In MKV, the timing fields are stripped, just the rest remains
+            const parts = text.split(',');
+            if (parts.length >= 9) {
+                text = parts.slice(8).join(',');
+            }
+            // Strip ASS override tags like {\b1}, {\an8}, etc.
+            text = text.replace(/\{[^}]*\}/g, '');
+            // Convert \N to <br>
+            text = text.replace(/\\N/g, '<br>');
+            text = text.trim();
+            if (text) {
+                this.subtitles.push({
+                    startUs: evt.start_us,
+                    endUs: evt.start_us + evt.duration_us,
+                    text,
+                });
+            }
+        }
+    }
+
+    updateSubtitles(elapsedUs) {
+        if (!this.subtitleEl || this.subtitles.length === 0) return;
+        // Find active subtitles
+        let active = '';
+        for (const sub of this.subtitles) {
+            if (elapsedUs >= sub.startUs && elapsedUs < sub.endUs) {
+                active += (active ? '<br>' : '') + sub.text;
+            }
+        }
+        if (active !== this.lastSubText) {
+            this.subtitleEl.innerHTML = active;
+            this.lastSubText = active;
         }
     }
 
@@ -469,8 +528,11 @@ async function loadUrl(url) {
     }
 }
 
-document.getElementById('load-sample')?.addEventListener('click', () => {
+document.getElementById('load-sample-mp4')?.addEventListener('click', () => {
     loadUrl('./data/hellmode12_2m.mp4');
+});
+document.getElementById('load-sample-mkv')?.addEventListener('click', () => {
+    loadUrl('./data/hellmode12_2m.mkv');
 });
 
 fileInput.addEventListener('change', (e) => {

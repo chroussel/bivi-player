@@ -63,21 +63,36 @@
         }
         button:hover { background: #444; }
         #time { font-size: 0.85rem; color: #999; }
+        #subtitles {
+            position: absolute;
+            bottom: 8%;
+            left: 0; right: 0;
+            text-align: center;
+            color: #fff;
+            font-size: 1.4rem;
+            text-shadow: 1px 1px 3px #000, -1px -1px 3px #000;
+            pointer-events: none;
+            padding: 0 5%;
+        }
     </style>
 </head>
 <body>
     <h1>HEVC Video Player</h1>
 
     <label id="drop-zone" for="file-input">
-        Drop an HEVC .mp4 file here or click to browse
-        <input type="file" id="file-input" accept=".mp4,.m4v,.mov">
+        Drop an HEVC .mp4/.mkv file here or click to browse
+        <input type="file" id="file-input" accept=".mp4,.m4v,.mov,.mkv,.webm">
     </label>
-    <button id="load-sample" style="margin-bottom:1rem">Load sample (hellmode12_2m.mp4)</button>
+    <button id="load-sample-mp4" style="margin-bottom:1rem">Load MP4 sample</button>
+    <button id="load-sample-mkv" style="margin-bottom:1rem">Load MKV sample (with subs)</button>
 
     <div id="status"></div>
 
     <div id="player-container">
-        <canvas id="canvas"></canvas>
+        <div style="position:relative;display:inline-block">
+            <canvas id="canvas"></canvas>
+            <div id="subtitles"></div>
+        </div>
         <div id="controls">
             <button id="play-btn">Play</button>
             <button id="pause-btn">Pause</button>
