@@ -1,22 +1,38 @@
 /**
- * Stream loader — fetches MP4 data via Range requests.
- * Loads moov box first, then fetches media samples on demand.
+ * Stream loader — fetches media data via Range requests.
+ * Auto-detects format from first bytes, handles MP4 moov + MKV progressive.
  */
 export class StreamLoader {
     constructor(url) {
         this.url = url;
         this.fileSize = 0;
         this.moovData = null;
+        this.isMkv = false;
+        this._mkvOffset = 0;
+        this._done = false;
     }
 
-    async initHead() {
+    /**
+     * Initialize: HEAD for file size, detect format from first bytes,
+     * find moov if MP4.
+     */
+    async init() {
         const head = await fetch(this.url, { method: 'HEAD' });
         this.fileSize = parseInt(head.headers.get('Content-Length') || '0');
         if (!this.fileSize) throw new Error('Cannot determine file size');
-    }
 
-    async init() {
-        await this.initHead();
+        // Detect format from first 4 bytes
+        const probe = await this.fetchRange(0, Math.min(65536, this.fileSize));
+        this.isMkv = probe[0] === 0x1A && probe[1] === 0x45 && probe[2] === 0xDF && probe[3] === 0xA3;
+
+        if (this.isMkv) {
+            // MKV: first chunk already fetched — push it later during bufferMore
+            this._probeData = probe;
+            this._mkvOffset = probe.length;
+            return;
+        }
+
+        // MP4: find moov box from the probe data
 
         // Fetch first 64KB — should contain ftyp + moov for faststart files
         let moovData = await this.fetchRange(0, Math.min(65536, this.fileSize));
@@ -176,6 +192,37 @@ export class StreamLoader {
         demuxer.evictSamples(keepStart, lastVideoIdx + 1, 0, demuxer.audioSampleCount());
 
         return lastVideoIdx + 1;
+    }
+
+    /**
+     * Unified buffer-more: fetch next 1MB of data for any format.
+     * Returns { done, nextSample } — done=true when file fully fetched.
+     */
+    async bufferMore(demuxer, fromSample) {
+        if (this._done) return { done: true, nextSample: fromSample };
+
+        if (this.isMkv) {
+            // Push initial probe data on first call
+            if (this._probeData) {
+                demuxer.pushData(this._probeData);
+                this._probeData = null;
+            }
+            // MKV: sequential 1MB chunks, push to streaming demuxer
+            const end = Math.min(this._mkvOffset + 1024 * 1024, this.fileSize);
+            const chunk = await this.fetchRange(this._mkvOffset, end);
+            this._mkvOffset = end;
+            demuxer.pushData(chunk);
+
+            if (this._mkvOffset >= this.fileSize) {
+                demuxer.finish();
+                this._done = true;
+            }
+            return { done: this._done, nextSample: demuxer.sampleCount() };
+        } else {
+            // MP4: fetch 1MB of interleaved sample data
+            const nextIdx = await this.fetchChunk(demuxer, fromSample);
+            return { done: false, nextSample: nextIdx };
+        }
     }
 
     /**

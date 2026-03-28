@@ -98,31 +98,23 @@ export class HevcPlayerElement extends HTMLElement {
     // ── Public API ──
 
     async loadFile(file) {
-        await this._ensureCore();
+        // Blob URLs support Range requests in most browsers
+        const url = URL.createObjectURL(file);
         try {
-            const buf = await file.arrayBuffer();
-            await this._core.load(buf);
-        } catch (e) { this._el.status.textContent = `Error: ${e.message}`; console.error(e); }
+            await this.streamUrl(url);
+        } finally {
+            // Don't revoke yet — streaming needs it alive
+        }
     }
 
     async loadUrl(url) {
-        await this._ensureCore();
-        this._el.status.textContent = 'Fetching...';
-        try {
-            const resp = await fetch(url);
-            if (!resp.ok) throw new Error(`${resp.status}`);
-            await this._core.load(await resp.arrayBuffer());
-        } catch (e) { this._el.status.textContent = `Error: ${e.message}`; console.error(e); }
+        await this.streamUrl(url);
     }
 
     async streamUrl(url) {
         await this._ensureCore();
         try {
-            if (url.match(/\.mkv(\?|$)/i)) {
-                await this._core.loadStreamMkv(url);
-            } else {
-                await this._core.loadStream(url);
-            }
+            await this._core.loadStream(url);
         } catch (e) { this._el.status.textContent = `Error: ${e.message}`; console.error(e); }
     }
 
