@@ -32,35 +32,39 @@ impl MediaSession {
         Ok(MediaSession { loader, source, state, last_fetched_sample: 0 })
     }
 
-    /// Fetch next 1MB chunk and push to demuxer. Returns true if more data available.
-    pub async fn buffer_more(&mut self) -> Result<bool, JsValue> {
-        if self.loader.is_done() { return Ok(false); }
-
-        // For MP4: fetch from sample offset. For MKV: sequential.
-        let (chunk, file_offset) = match &self.source.inner {
+    /// Get parameters for the next fetch. Returns (offset, size) or None if done.
+    pub fn next_fetch_range(&self) -> Option<Vec<f64>> {
+        if self.loader.is_done() { return None; }
+        let chunk_size = 1024 * 1024u64;
+        match &self.source.inner {
             crate::media_source::Inner::Mp4(mp4) => {
                 let sample_off = mp4.video_sample_offset(self.last_fetched_sample) as u64;
-                let fetch_start = sample_off.saturating_sub(64 * 1024);
-                let data = self.loader.fetch_range_at(fetch_start).await?;
-                (data, fetch_start)
+                let start = sample_off.saturating_sub(64 * 1024);
+                let end = (start + chunk_size).min(self.loader.file_size() as u64);
+                Some(vec![start as f64, end as f64])
             }
             _ => {
-                let off = self.loader.current_offset();
-                let data = self.loader.fetch_chunk().await?;
-                (data, off)
+                let start = self.loader.current_offset();
+                let end = (start + chunk_size).min(self.loader.file_size() as u64);
+                Some(vec![start as f64, end as f64])
             }
-        };
-
-        if !chunk.is_empty() {
-            self.last_fetched_sample = self.source.push_chunk(&chunk, file_offset, self.last_fetched_sample);
         }
+    }
+
+    /// Push fetched data into the demuxer. Call after fetching the range from next_fetch_range.
+    pub fn push_fetched(&mut self, data: &[u8], file_offset: f64) -> bool {
+        if !data.is_empty() {
+            self.last_fetched_sample = self.source.push_chunk(data, file_offset as u64, self.last_fetched_sample);
+        }
+        self.loader.advance_offset(data.len() as u64);
         self.state.set_total_video_samples(self.source.sample_count());
         self.state.set_total_audio_samples(self.source.audio_sample_count());
         if self.loader.is_done() {
             self.source.finish();
             self.state.set_still_downloading(false);
+            return false;
         }
-        Ok(!self.loader.is_done())
+        true
     }
 
     pub fn is_done(&self) -> bool { self.loader.is_done() }

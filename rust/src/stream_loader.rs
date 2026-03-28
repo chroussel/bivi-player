@@ -139,6 +139,10 @@ impl StreamLoader {
     pub fn format(&self) -> ContainerFormat { self.format }
     pub fn is_mkv(&self) -> bool { self.format == ContainerFormat::Mkv }
     pub fn current_offset(&self) -> u64 { self.mkv_offset }
+    pub fn advance_offset(&mut self, n: u64) {
+        self.mkv_offset += n;
+        if self.mkv_offset >= self.file_size { self.done = true; }
+    }
     pub fn file_size(&self) -> f64 { self.file_size as f64 }
     pub fn is_done(&self) -> bool { self.done }
     pub fn init_data(&self) -> Vec<u8> { self.init_data.clone() }

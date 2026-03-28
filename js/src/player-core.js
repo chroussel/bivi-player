@@ -44,6 +44,7 @@ export class HEVCPlayerCore {
         this.clock = new PlaybackClock();
 
         this._setStatus('Connecting...');
+        this._url = url;
         this.session = await new MediaSession(url);
 
         // Buffer until ready to play
@@ -382,9 +383,21 @@ export class HEVCPlayerCore {
 
     async _bufferMore() {
         if (this._fetchingData) return;
+        // Step 1: get fetch range (brief borrow, released immediately)
+        const range = this.session.next_fetch_range();
+        if (!range) return;
+        const [start, end] = range;
+
+        // Step 2: fetch data (no Rust borrow held during await)
         this._fetchingData = true;
         try {
-            const more = await this.session.buffer_more();
+            const resp = await fetch(this._url, {
+                headers: { Range: `bytes=${start}-${end - 1}` },
+            });
+            const data = new Uint8Array(await resp.arrayBuffer());
+
+            // Step 3: push to Rust (brief borrow)
+            const more = this.session.push_fetched(data, start);
             this._stillDownloading = more;
             if (!more && this.session.has_subtitles()) {
                 this.loadSubtitles();
