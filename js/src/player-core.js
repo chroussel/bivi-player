@@ -87,15 +87,6 @@ export class HEVCPlayerCore {
     }
 
     async _postInit() {
-        this._setStatus(this._getStatus().replace(/ — .*/, '') + ' — Decoding thumbnail...');
-        await this.decodeFirstFrame();
-
-        this.session.set_next_video_sample(0);
-        this.session.clear_pending();
-        this.frameBuffer.reset();
-        const config = this.session.codec_description();
-        this.worker.postMessage({ type: 'reset', config });
-
         if (this.session.has_audio() && typeof AudioDecoder !== 'undefined') {
             await this.initAudio();
         }
@@ -105,59 +96,7 @@ export class HEVCPlayerCore {
         }
 
         this.populateTrackSelectors();
-
         this._setStatus(this._getStatus().replace(/ — .*/, '') + ' — Ready');
-    }
-
-    async decodeFirstFrame() {
-        return new Promise((resolve) => {
-            const prevHandler = this.worker.onmessage;
-            let sent = 0;
-            const maxToSend = Math.min(30, this.session.total_video_samples());
-
-            const trySend = () => {
-                while (sent < maxToSend && this.session.next_video_sample() < this.session.total_video_samples()) {
-                    const sample = this.session.read_sample(this.session.next_video_sample());
-                    if (!sample) break;
-                    this.session.advance_video_sample();
-                    this.worker.postMessage({
-                        type: 'samples',
-                        samples: [{ data: sample.data, pts: 0 }],
-                        nalLengthSize: this.session.nal_length_size(),
-                    });
-                    sent++;
-                    break;
-                }
-            };
-
-            const timeout = setTimeout(() => {
-                console.warn('[thumbnail] timed out after sending', sent, 'samples');
-                this.worker.onmessage = prevHandler;
-                resolve();
-            }, 10000);
-
-            this.worker.onmessage = (e) => {
-                const msg = e.data;
-                if (msg.type === 'frame') {
-                    this.frameBuffer.push(msg.pts, msg.y, msg.u, msg.v, msg.w, msg.h);
-                    this.frameBuffer.pop_frame(Infinity, true);
-                    this.renderer.render_current_frame(this.frameBuffer);
-                    clearTimeout(timeout);
-                    this.worker.onmessage = prevHandler;
-                    resolve();
-                } else if (msg.type === 'decoded') {
-                    this.session.sub_pending(1);
-                    if (msg.frames === 0) trySend();
-                } else if (msg.type === 'log') {
-                    console.log('[decoder]', msg.msg);
-                } else if (msg.type === 'error') {
-                    console.error('[decoder]', msg.msg);
-                }
-            };
-
-            this.session.clear_pending();
-            trySend();
-        });
     }
 
     onWorkerMessage(msg) {
