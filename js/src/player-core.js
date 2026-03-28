@@ -41,10 +41,8 @@ export class HEVCPlayerCore {
         this.renderer = new Renderer(this.canvas);
         this.frameBuffer = new FrameBuffer(50, 3);
         this.clock = new PlaybackClock();
-        this.updateTime(0);
 
         this._setStatus('Connecting...');
-        // Rust MediaSession: probe + detect + create demuxer — all in one
         this.session = await new MediaSession(url);
 
         // Buffer until ready to play
