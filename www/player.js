@@ -1,4 +1,5 @@
 import wasmInit, { Demuxer, MkvDemuxer, FrameBuffer, PlaybackClock, Renderer } from './pkg/videoplayer.js';
+import { debounce, accumulatedDebounce } from './debounce.js';
 
 const dropZone = document.getElementById('drop-zone');
 const fileInput = document.getElementById('file-input');
@@ -656,39 +657,37 @@ speedSelect.addEventListener('change', () => {
 });
 
 // Seekbar — pause on drag, seek live, resume on release
-let seekDebounce = null;
+const debouncedSeek = debounce((targetUs) => player?.seek(targetUs), 100);
 let wasPlayingBeforeDrag = false;
-seekbar.addEventListener('mousedown', () => {
+
+function onSeekDragStart() {
     if (!player) return;
     player._seekDragging = true;
     wasPlayingBeforeDrag = player.clock.is_playing();
     if (wasPlayingBeforeDrag) player.pause();
-});
-seekbar.addEventListener('touchstart', () => {
-    if (!player) return;
-    player._seekDragging = true;
-    wasPlayingBeforeDrag = player.clock.is_playing();
-    if (wasPlayingBeforeDrag) player.pause();
-});
+}
+seekbar.addEventListener('mousedown', onSeekDragStart);
+seekbar.addEventListener('touchstart', onSeekDragStart);
 seekbar.addEventListener('input', () => {
     if (!player) return;
-    const frac = seekbar.value / 1000;
-    const targetUs = frac * player.durationMs * 1000;
+    const targetUs = (seekbar.value / 1000) * player.durationMs * 1000;
     player.updateTime(targetUs / 1000);
     player.updateSubtitles(targetUs);
-    clearTimeout(seekDebounce);
-    seekDebounce = setTimeout(() => player.seek(targetUs), 100);
+    debouncedSeek(targetUs);
 });
 seekbar.addEventListener('change', () => {
     if (!player) return;
     player._seekDragging = false;
-    clearTimeout(seekDebounce);
-    const frac = seekbar.value / 1000;
-    const targetUs = frac * player.durationMs * 1000;
-    // Force _seekResume based on pre-drag state
+    debouncedSeek.cancel();
+    const targetUs = (seekbar.value / 1000) * player.durationMs * 1000;
     player._seekResumeOverride = wasPlayingBeforeDrag;
     player.seek(targetUs);
 });
+
+const arrowSeek = accumulatedDebounce((targetUs) => {
+    if (!player) return;
+    player.seek(Math.max(0, Math.min(targetUs, player.durationMs * 1000)));
+}, 300);
 
 document.addEventListener('keydown', (e) => {
     if (e.code === 'Space') {
@@ -699,20 +698,13 @@ document.addEventListener('keydown', (e) => {
     if ((e.code === 'ArrowRight' || e.code === 'ArrowLeft') && player) {
         e.preventDefault();
         const delta = e.code === 'ArrowRight' ? 10_000_000 : -10_000_000;
-        if (!player._arrowSeekBase) {
-            player._arrowSeekBase = player._seekTarget ?? player.clock.elapsed_us(performance.now());
-            player._arrowSeekAccum = 0;
+        arrowSeek.add(delta, () =>
+            player._seekTarget ?? player.clock.elapsed_us(performance.now())
+        );
+        const pending = arrowSeek.pending();
+        if (pending != null) {
+            const clamped = Math.max(0, Math.min(pending, player.durationMs * 1000));
+            player.updateTime(clamped / 1000);
         }
-        player._arrowSeekAccum += delta;
-        const target = Math.max(0, Math.min(
-            player._arrowSeekBase + player._arrowSeekAccum,
-            player.durationMs * 1000
-        ));
-        player.updateTime(target / 1000);
-        clearTimeout(player._arrowSeekTimer);
-        player._arrowSeekTimer = setTimeout(() => {
-            player._arrowSeekBase = null;
-            player.seek(target);
-        }, 300);
     }
 });
