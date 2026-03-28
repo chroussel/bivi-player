@@ -10,23 +10,25 @@ static codec_frame_t pending[CODEC_MAX_FRAMES];
 static int num_pending = 0;
 
 /* Ring buffer for stable plane copies */
-#define NUM_SLOTS 32
-#define MAX_Y (3840 * 2160)
-#define MAX_C (1920 * 1080)
-static uint8_t* ring_y[NUM_SLOTS];
-static uint8_t* ring_u[NUM_SLOTS];
-static uint8_t* ring_v[NUM_SLOTS];
+#define NUM_SLOTS 16
+#define MAX_Y (1920 * 1080)
+#define MAX_C (960 * 540)
+static uint8_t* ring_y[NUM_SLOTS] = {0};
+static uint8_t* ring_u[NUM_SLOTS] = {0};
+static uint8_t* ring_v[NUM_SLOTS] = {0};
 static int ring_idx = 0;
-static int ring_init = 0;
+static int ring_y_size = 0;
+static int ring_c_size = 0;
 
-static void ensure_ring(void) {
-    if (ring_init) return;
+static void ensure_ring(int y_size, int c_size) {
+    if (ring_y[0] && ring_y_size >= y_size && ring_c_size >= c_size) return;
     for (int i = 0; i < NUM_SLOTS; i++) {
-        ring_y[i] = (uint8_t*)malloc(MAX_Y);
-        ring_u[i] = (uint8_t*)malloc(MAX_C);
-        ring_v[i] = (uint8_t*)malloc(MAX_C);
+        free(ring_y[i]); ring_y[i] = (uint8_t*)malloc(y_size);
+        free(ring_u[i]); ring_u[i] = (uint8_t*)malloc(c_size);
+        free(ring_v[i]); ring_v[i] = (uint8_t*)malloc(c_size);
     }
-    ring_init = 1;
+    ring_y_size = y_size;
+    ring_c_size = c_size;
 }
 
 int codec_init(void) {
@@ -101,7 +103,6 @@ int codec_decode(void) {
 
 int codec_collect_frames(void) {
     if (!ctx) return 0;
-    ensure_ring();
     num_pending = 0;
     const struct de265_image* img;
     while (num_pending < CODEC_MAX_FRAMES && (img = de265_get_next_picture(ctx)) != NULL) {
@@ -117,6 +118,7 @@ int codec_collect_frames(void) {
         const uint8_t* u = de265_get_image_plane(img, 1, &u_stride);
         const uint8_t* v = de265_get_image_plane(img, 2, &v_stride);
         int cw = f->w >> 1, ch = f->h >> 1;
+        ensure_ring(f->w * f->h, cw * ch);
 
         int slot = ring_idx;
         ring_idx = (ring_idx + 1) % NUM_SLOTS;

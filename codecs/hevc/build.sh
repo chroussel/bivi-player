@@ -27,8 +27,8 @@ em++ -O3 -msimd128 \
     '_malloc', '_free' \
   ]" \
   -s EXPORTED_RUNTIME_METHODS="['HEAPU8','getValue']" \
-  -s ALLOW_MEMORY_GROWTH=0 \
-  -s INITIAL_MEMORY=536870912 \
+  -s ALLOW_MEMORY_GROWTH=1 \
+  -s INITIAL_MEMORY=134217728 \
   -s STACK_SIZE=2097152 \
   -s NO_FILESYSTEM=1 \
   -s ENVIRONMENT=web,worker \
