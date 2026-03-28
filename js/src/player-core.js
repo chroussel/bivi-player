@@ -107,7 +107,8 @@ export class HEVCPlayerCore {
 
     async _initDecoder() {
         this._setStatus(this._getStatus() + ' — Loading decoder...');
-        this.worker = new Worker('./decode-worker.js', { type: 'module' });
+        const workerUrl = new URL('./decode-worker.js', import.meta.url).href;
+        this.worker = new Worker(workerUrl, { type: 'module' });
 
         await new Promise((resolve, reject) => {
             const timeout = setTimeout(() => reject(new Error('Decoder init timed out')), 10000);
