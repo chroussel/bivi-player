@@ -7,12 +7,14 @@ use wasm_bindgen_futures::JsFuture;
 use crate::demuxer::Sample;
 use crate::media_source::MediaSource;
 use crate::mkv::{SubtitleEvent, TrackInfo};
+use crate::player_state::PlayerState;
 use crate::stream_loader::StreamLoader;
 
 #[wasm_bindgen]
 pub struct MediaSession {
     loader: StreamLoader,
     source: MediaSource,
+    state: PlayerState,
     last_fetched_sample: u32,
 }
 
@@ -25,7 +27,9 @@ impl MediaSession {
         let loader = StreamLoader::new(url).await?;
         let mut source = MediaSource::new();
         source.init_from_bytes(loader.init_data())?;
-        Ok(MediaSession { loader, source, last_fetched_sample: 0 })
+        let mut state = PlayerState::new();
+        state.set_still_downloading(true);
+        Ok(MediaSession { loader, source, state, last_fetched_sample: 0 })
     }
 
     /// Fetch next 1MB chunk and push to demuxer. Returns true if more data available.
@@ -35,13 +39,37 @@ impl MediaSession {
         if !chunk.is_empty() {
             self.last_fetched_sample = self.source.push_chunk(&chunk, self.last_fetched_sample);
         }
+        self.state.set_total_video_samples(self.source.sample_count());
+        self.state.set_total_audio_samples(self.source.audio_sample_count());
         if self.loader.is_done() {
             self.source.finish();
+            self.state.set_still_downloading(false);
         }
         Ok(!self.loader.is_done())
     }
 
     pub fn is_done(&self) -> bool { self.loader.is_done() }
+
+    // ── State delegation ──
+
+    pub fn next_video_sample(&self) -> u32 { self.state.next_video_sample() }
+    pub fn set_next_video_sample(&mut self, n: u32) { self.state.set_next_video_sample(n); }
+    pub fn advance_video_sample(&mut self) { self.state.advance_video_sample(); }
+    pub fn next_audio_sample(&self) -> u32 { self.state.next_audio_sample() }
+    pub fn set_next_audio_sample(&mut self, n: u32) { self.state.set_next_audio_sample(n); }
+    pub fn advance_audio_sample(&mut self) { self.state.advance_audio_sample(); }
+    pub fn total_video_samples(&self) -> u32 { self.state.total_video_samples() }
+    pub fn total_audio_samples(&self) -> u32 { self.state.total_audio_samples() }
+    pub fn pending_decodes(&self) -> u32 { self.state.pending_decodes() }
+    pub fn add_pending(&mut self, n: u32) { self.state.add_pending(n); }
+    pub fn sub_pending(&mut self, n: u32) { self.state.sub_pending(n); }
+    pub fn clear_pending(&mut self) { self.state.clear_pending(); }
+    pub fn flushed(&self) -> bool { self.state.flushed() }
+    pub fn set_flushed(&mut self, v: bool) { self.state.set_flushed(v); }
+    pub fn still_downloading(&self) -> bool { self.state.still_downloading() }
+    pub fn should_feed(&self, buf_len: u32) -> bool { self.state.should_feed(buf_len) }
+    pub fn should_flush(&self) -> bool { self.state.should_flush() }
+    pub fn needs_buffer(&self) -> bool { self.state.needs_buffer() }
 
     // ── Delegate to MediaSource ──
 
