@@ -42,6 +42,12 @@ pub struct TrackInfo {
     codec: String,
 }
 
+impl TrackInfo {
+    pub fn from_parts(name: &str, language: &str, codec: &str) -> Self {
+        TrackInfo { name: name.to_string(), language: language.to_string(), codec: codec.to_string() }
+    }
+}
+
 #[wasm_bindgen]
 impl TrackInfo {
     #[wasm_bindgen(getter)]

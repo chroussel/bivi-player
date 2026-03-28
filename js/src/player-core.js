@@ -390,8 +390,10 @@ export class HEVCPlayerCore {
         // Reload subtitles if more arrived (streaming)
         const subCount = this.demuxer.subtitleCount();
         if (subCount > this._lastSubCount) {
+            const firstSubs = this._lastSubCount === 0;
             this._lastSubCount = subCount;
             this.loadSubtitles();
+            if (firstSubs) this.populateTrackSelectors(); // show dropdown
         }
         this.updateSubtitles(elapsedUs);
 

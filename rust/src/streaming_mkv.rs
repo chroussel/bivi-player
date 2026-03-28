@@ -181,8 +181,17 @@ impl StreamingMkvDemuxer {
 
     // ── Subtitles ──
 
-    pub fn has_subtitles(&self) -> bool { !self.subtitle_events.is_empty() }
+    pub fn has_subtitles(&self) -> bool { !self.subtitle_tracks.is_empty() || !self.subtitle_events.is_empty() }
+    pub fn subtitle_track_count(&self) -> u32 { self.subtitle_tracks.len().max(if self.subtitle_events.is_empty() { 0 } else { 1 }) as u32 }
     pub fn subtitle_count(&self) -> u32 { self.subtitle_events.len() as u32 }
+
+    pub fn subtitle_track_info(&self, index: u32) -> Option<crate::mkv::TrackInfo> {
+        let track_id = self.subtitle_tracks.get(index as usize)?;
+        let t = self.parser.tracks.iter().find(|t| t.number == *track_id)?;
+        Some(crate::mkv::TrackInfo::from_parts(
+            &t.name, &t.language, &t.codec_id,
+        ))
+    }
 
     pub fn subtitle_event(&self, index: u32) -> Option<SubtitleEvent> {
         let e = self.subtitle_events.get(index as usize)?;
