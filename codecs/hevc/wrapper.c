@@ -9,29 +9,14 @@ static const uint8_t start_code[] = {0, 0, 0, 1};
 static codec_frame_t pending[CODEC_MAX_FRAMES];
 static int num_pending = 0;
 
-/* Ring buffer of plane copies — survives across collect_frames calls */
-#define NUM_PLANE_SLOTS 32
-#define MAX_PLANE_BUF (1920 * 1080 * 2)
-#define MAX_CHROMA_BUF (960 * 540 * 2)
-static uint8_t* plane_bufs[NUM_PLANE_SLOTS][3] = {{0}};
-static int plane_bufs_allocated = 0;
-static int ring_idx = 0;
+/* Implemented in Rust codec-wrapper */
+extern void codec_ring_store(
+    const uint8_t* y, const uint8_t* u, const uint8_t* v,
+    int y_stride, int u_stride, int v_stride,
+    int w, int h, int bpp,
+    uint32_t* out_y, uint32_t* out_u, uint32_t* out_v
+);
 
-static void ensure_plane_bufs(void) {
-    if (plane_bufs_allocated) return;
-    for (int i = 0; i < NUM_PLANE_SLOTS; i++) {
-        plane_bufs[i][0] = (uint8_t*)malloc(MAX_PLANE_BUF);
-        plane_bufs[i][1] = (uint8_t*)malloc(MAX_CHROMA_BUF);
-        plane_bufs[i][2] = (uint8_t*)malloc(MAX_CHROMA_BUF);
-    }
-    plane_bufs_allocated = 1;
-}
-
-static int next_slot(void) {
-    int s = ring_idx;
-    ring_idx = (ring_idx + 1) % NUM_PLANE_SLOTS;
-    return s;
-}
 
 int codec_init(void) {
     ctx = de265_new_decoder();
@@ -113,7 +98,6 @@ int codec_decode(void) {
 
 int codec_collect_frames(void) {
     if (!ctx) return 0;
-    ensure_plane_bufs();
     num_pending = 0;
     const struct de265_image* img;
     while (num_pending < CODEC_MAX_FRAMES && (img = de265_get_next_picture(ctx)) != NULL) {
@@ -131,37 +115,17 @@ int codec_collect_frames(void) {
         int cw = f->w >> 1;
         int ch = f->h >> 1;
 
-        /* Copy + convert to 8-bit into ring buffer slot */
-        int slot = next_slot();
-        if (f->bpp > 8) {
-            int shift = f->bpp - 8;
-            for (int r = 0; r < f->h; r++) {
-                const uint16_t* src = (const uint16_t*)(y + r * y_stride);
-                uint8_t* dst = plane_bufs[slot][0] + r * f->w;
-                for (int c = 0; c < f->w; c++) dst[c] = src[c] >> shift;
-            }
-            for (int r = 0; r < ch; r++) {
-                const uint16_t* su = (const uint16_t*)(u + r * u_stride);
-                const uint16_t* sv = (const uint16_t*)(v + r * v_stride);
-                uint8_t* du = plane_bufs[slot][1] + r * cw;
-                uint8_t* dv = plane_bufs[slot][2] + r * cw;
-                for (int c = 0; c < cw; c++) { du[c] = su[c] >> shift; dv[c] = sv[c] >> shift; }
-            }
-        } else {
-            for (int r = 0; r < f->h; r++)
-                memcpy(plane_bufs[slot][0] + r * f->w, y + r * y_stride, f->w);
-            for (int r = 0; r < ch; r++) {
-                memcpy(plane_bufs[slot][1] + r * cw, u + r * u_stride, cw);
-                memcpy(plane_bufs[slot][2] + r * cw, v + r * v_stride, cw);
-            }
-        }
+        /* Rust ring buffer handles 10-bit→8-bit + stride stripping */
+        uint32_t out_y, out_u, out_v;
+        codec_ring_store(y, u, v, y_stride, u_stride, v_stride,
+                         f->w, f->h, f->bpp, &out_y, &out_u, &out_v);
 
         f->bpp = 8;
-        f->plane0_ptr = (uint32_t)(uintptr_t)plane_bufs[slot][0];
+        f->plane0_ptr = out_y;
         f->plane0_stride = f->w;
-        f->plane1_ptr = (uint32_t)(uintptr_t)plane_bufs[slot][1];
+        f->plane1_ptr = out_u;
         f->plane1_stride = cw;
-        f->plane2_ptr = (uint32_t)(uintptr_t)plane_bufs[slot][2];
+        f->plane2_ptr = out_v;
         f->plane2_stride = cw;
         num_pending++;
     }

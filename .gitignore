@@ -8,3 +8,5 @@
 /vendor
 www/codec-*.js
 www/codec-*.wasm
+/codecs/codec-wrapper/target
+/codecs/codec-wrapper/Cargo.lock
