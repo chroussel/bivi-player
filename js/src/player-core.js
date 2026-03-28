@@ -138,6 +138,7 @@ export class HEVCPlayerCore {
     }
 
     feedWorker() {
+        if (this._seekTarget != null) return;
         if (!this.session.should_feed(this.frameBuffer.len())) {
             if (this.session.should_flush()) {
                 this.worker.postMessage({ type: 'flush' });
