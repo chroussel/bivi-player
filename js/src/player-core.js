@@ -1,6 +1,7 @@
 import wasmInit, { Demuxer, MkvDemuxer, StreamingDemuxer, StreamingMkvDemuxer, FrameBuffer, PlaybackClock, Renderer } from './pkg/videoplayer.js';
 export { wasmInit };
 import { StreamLoader } from './stream-loader.js';
+import { DemuxerInterface } from './demuxer-interface.js';
 
 export class HEVCPlayerCore {
     constructor(canvas, dom) {
@@ -55,14 +56,13 @@ export class HEVCPlayerCore {
         this._setStatus('Parsing container...');
         const data = new Uint8Array(arrayBuffer);
         const isMkv = data[0] === 0x1A && data[1] === 0x45 && data[2] === 0xDF && data[3] === 0xA3;
-        this.demuxer = isMkv ? new MkvDemuxer(data) : new Demuxer(data);
-        this.isMkv = isMkv;
+        this.demuxer = new DemuxerInterface(isMkv ? new MkvDemuxer(data) : new Demuxer(data));
 
         this.canvas.width = this.demuxer.width();
         this.canvas.height = this.demuxer.height();
-        this.totalSamples = this.demuxer.sample_count();
-        this.durationMs = this.demuxer.duration_ms();
-        this.nalLengthSize = this.demuxer.nal_length_size();
+        this.totalSamples = this.demuxer.sampleCount();
+        this.durationMs = this.demuxer.durationMs();
+        this.nalLengthSize = this.demuxer.nalLengthSize();
 
         this._setStatus(`Video: ${this.demuxer.width()}x${this.demuxer.height()}, ${this.totalSamples} frames, ${(this.durationMs / 1000).toFixed(1)}s`);
 
@@ -83,14 +83,14 @@ export class HEVCPlayerCore {
         await this.streamLoader.init();
 
         this._setStatus('Parsing metadata...');
-        this.demuxer = new StreamingDemuxer(this.streamLoader.moovData);
+        this.demuxer = new DemuxerInterface(new StreamingDemuxer(this.streamLoader.moovData));
         this.isStreaming = true;
 
         this.canvas.width = this.demuxer.width();
         this.canvas.height = this.demuxer.height();
-        this.totalSamples = this.demuxer.sample_count();
-        this.durationMs = this.demuxer.duration_ms();
-        this.nalLengthSize = this.demuxer.nal_length_size();
+        this.totalSamples = this.demuxer.sampleCount();
+        this.durationMs = this.demuxer.durationMs();
+        this.nalLengthSize = this.demuxer.nalLengthSize();
 
         this._setStatus(`Video: ${this.demuxer.width()}x${this.demuxer.height()}, ${this.totalSamples} frames, ${(this.durationMs / 1000).toFixed(1)}s (streaming)`);
 
@@ -117,8 +117,8 @@ export class HEVCPlayerCore {
         this._setStatus('Streaming MKV...');
         this.streamLoader = new StreamLoader(url);
         await this.streamLoader.initHead(); // just HEAD, no moov scan
-        this.demuxer = new StreamingMkvDemuxer();
-        this.isMkv = true;
+        this.demuxer = new DemuxerInterface(new StreamingMkvDemuxer());
+        this.demuxer.stillDownloading = true;
         this._mkvFetchOffset = 0;
 
         // Fetch 1MB chunks until we have header + enough frames
@@ -126,19 +126,19 @@ export class HEVCPlayerCore {
             const end = Math.min(this._mkvFetchOffset + 1024 * 1024, this.streamLoader.fileSize);
             const chunk = await this.streamLoader.fetchRange(this._mkvFetchOffset, end);
             this._mkvFetchOffset = end;
-            this.demuxer.push_data(chunk);
-            const frames = this.demuxer.sample_count();
+            this.demuxer.pushData(chunk);
+            const frames = this.demuxer.sampleCount();
             this._setStatus(`Buffering... ${frames} frames`);
-            if (this.demuxer.header_ready() && frames >= 30) break;
+            if (this.demuxer.headerReady() && frames >= 30) break;
         }
 
-        if (!this.demuxer.header_ready()) throw new Error('Could not parse MKV header');
+        if (!this.demuxer.headerReady()) throw new Error('Could not parse MKV header');
 
         this.canvas.width = this.demuxer.width();
         this.canvas.height = this.demuxer.height();
-        this.totalSamples = this.demuxer.sample_count();
-        this.durationMs = this.demuxer.duration_ms();
-        this.nalLengthSize = this.demuxer.nal_length_size();
+        this.totalSamples = this.demuxer.sampleCount();
+        this.durationMs = this.demuxer.durationMs();
+        this.nalLengthSize = this.demuxer.nalLengthSize();
 
         this._setStatus(`Video: ${this.demuxer.width()}x${this.demuxer.height()}, ${(this.durationMs / 1000).toFixed(1)}s (streaming MKV)`);
 
@@ -154,16 +154,17 @@ export class HEVCPlayerCore {
             const end = Math.min(this._mkvFetchOffset + 1024 * 1024, this.streamLoader.fileSize);
             const chunk = await this.streamLoader.fetchRange(this._mkvFetchOffset, end);
             this._mkvFetchOffset = end;
-            this.demuxer.push_data(chunk);
-            this.totalSamples = this.demuxer.sample_count();
-            this.totalAudioSamples = this.demuxer.audio_sample_count();
+            this.demuxer.pushData(chunk);
+            this.totalSamples = this.demuxer.sampleCount();
+            this.totalAudioSamples = this.demuxer.audioSampleCount();
         }
         this.demuxer.finish();
-        this.totalSamples = this.demuxer.sample_count();
-        this.totalAudioSamples = this.demuxer.audio_sample_count();
+        this.totalSamples = this.demuxer.sampleCount();
+        this.totalAudioSamples = this.demuxer.audioSampleCount();
         this._mkvDownloading = false;
+        this.demuxer.stillDownloading = false;
 
-        if (this.demuxer.has_subtitles?.()) {
+        if (this.demuxer.hasSubtitles()) {
             this.loadSubtitles();
         }
     }
@@ -181,7 +182,7 @@ export class HEVCPlayerCore {
                 if (e.data.type === 'log') console.log('[decoder]', e.data.msg);
             };
             this.worker.onerror = (e) => { clearTimeout(timeout); reject(e); };
-            const config = this.demuxer.codec_description();
+            const config = this.demuxer.codecDescription();
             this.worker.postMessage({ type: 'init', codec: 'hevc', config });
         });
 
@@ -195,14 +196,14 @@ export class HEVCPlayerCore {
         this.nextSample = 0;
         this.pendingDecodes = 0;
         this.frameBuffer.reset();
-        const config = this.demuxer.codec_description();
+        const config = this.demuxer.codecDescription();
         this.worker.postMessage({ type: 'reset', config });
 
-        if (this.demuxer.has_audio() && typeof AudioDecoder !== 'undefined') {
+        if (this.demuxer.hasAudio() && typeof AudioDecoder !== 'undefined') {
             await this.initAudio();
         }
 
-        if (this.demuxer.has_subtitles?.()) {
+        if (this.demuxer.hasSubtitles()) {
             this.loadSubtitles();
         }
 
@@ -219,7 +220,7 @@ export class HEVCPlayerCore {
 
             const trySend = () => {
                 while (sent < maxToSend && this.nextSample < this.totalSamples) {
-                    const sample = this.demuxer.read_sample(this.nextSample);
+                    const sample = this.demuxer.readSample(this.nextSample);
                     this.nextSample++;
                     if (!sample) continue;
                     this.worker.postMessage({
@@ -293,8 +294,12 @@ export class HEVCPlayerCore {
         if (this._seekTarget != null) return;
         if (this.pendingDecodes > 10) return;
         if (this.frameBuffer.len() > 30) return;
+
+        // Update sample counts (may grow during streaming MKV)
+        this.totalSamples = this.demuxer.sampleCount();
+
         if (this.nextSample >= this.totalSamples) {
-            if (!this.flushed && this.pendingDecodes === 0) {
+            if (!this.flushed && this.pendingDecodes === 0 && this.demuxer.canFlush()) {
                 this.worker.postMessage({ type: 'flush' });
             }
             return;
@@ -304,7 +309,7 @@ export class HEVCPlayerCore {
         const samples = [];
 
         for (let i = 0; i < batchSize; i++) {
-            const sample = this.demuxer.read_sample(this.nextSample);
+            const sample = this.demuxer.readSample(this.nextSample);
             if (!sample) break;
             this.nextSample++;
             samples.push({
@@ -357,13 +362,13 @@ export class HEVCPlayerCore {
             this.audioDecoder.reset();
             this.audioDecoder.configure({
                 codec: 'mp4a.40.2',
-                sampleRate: this.demuxer.audio_sample_rate(),
-                numberOfChannels: this.demuxer.audio_channel_count(),
-                description: this.demuxer.audio_codec_config(),
+                sampleRate: this.demuxer.audioSampleRate(),
+                numberOfChannels: this.demuxer.audioChannelCount(),
+                description: this.demuxer.audioCodecConfig(),
             });
         }
 
-        const hvcc = this.demuxer.codec_description();
+        const hvcc = this.demuxer.codecDescription();
         this.worker.postMessage({ type: 'reset', config: hvcc });
         this.renderer?.clear();
         this.updateTime(0);
@@ -450,18 +455,18 @@ export class HEVCPlayerCore {
         this.frameBuffer.reset();
         this.flushed = false;
         this.pendingDecodes = 0;
-        this.nextSample = this.demuxer.find_keyframe_before(targetUs);
+        this.nextSample = this.demuxer.findKeyframeBefore(targetUs);
         this._lastFetchedSample = this.nextSample;
 
         if (this.audioDecoder && this.audioDecoder.state !== 'closed') {
             this.audioBufferQueue = [];
-            this.nextAudioSample = this.demuxer.find_audio_sample_at(targetUs);
+            this.nextAudioSample = this.demuxer.findAudioSampleAt(targetUs);
             this.audioDecoder.reset();
             this.audioDecoder.configure({
                 codec: 'mp4a.40.2',
-                sampleRate: this.demuxer.audio_sample_rate(),
-                numberOfChannels: this.demuxer.audio_channel_count(),
-                description: this.demuxer.audio_codec_config(),
+                sampleRate: this.demuxer.audioSampleRate(),
+                numberOfChannels: this.demuxer.audioChannelCount(),
+                description: this.demuxer.audioCodecConfig(),
             });
         }
 
@@ -475,7 +480,7 @@ export class HEVCPlayerCore {
         this._seekTarget = targetUs;
         this._seekResume = this._seekResumeOverride ?? wasPlaying;
         this._seekResumeOverride = null;
-        const config = this.demuxer.codec_description();
+        const config = this.demuxer.codecDescription();
         this.worker.postMessage({ type: 'reset', config });
 
         // Buffer if streaming
@@ -533,11 +538,11 @@ export class HEVCPlayerCore {
         const subSel = this.dom.subTrackSelect;
         if (!audioSel || !subSel) return;
 
-        const audioCount = this.demuxer.audio_track_count?.() ?? (this.demuxer.has_audio() ? 1 : 0);
+        const audioCount = this.demuxer.audioTrackCount() ?? (this.demuxer.hasAudio() ? 1 : 0);
         if (audioCount > 1) {
             audioSel.innerHTML = '';
             for (let i = 0; i < audioCount; i++) {
-                const info = this.demuxer.audio_track_info?.(i);
+                const info = this.demuxer.audioTrackInfo(i);
                 const label = info ? `${info.language}${info.name ? ' — ' + info.name : ''}` : `Track ${i + 1}`;
                 audioSel.add(new Option(label, i));
             }
@@ -546,12 +551,12 @@ export class HEVCPlayerCore {
             audioSel.style.display = 'none';
         }
 
-        const subCount = this.demuxer.subtitle_track_count?.() ?? (this.demuxer.has_subtitles?.() ? 1 : 0);
+        const subCount = this.demuxer.subtitleTrackCount() ?? (this.demuxer.hasSubtitles() ? 1 : 0);
         if (subCount > 0) {
             subSel.innerHTML = '';
             subSel.add(new Option('Subs off', -1));
             for (let i = 0; i < subCount; i++) {
-                const info = this.demuxer.subtitle_track_info?.(i);
+                const info = this.demuxer.subtitleTrackInfo(i);
                 const label = info ? `${info.language}${info.name ? ' — ' + info.name : ''}` : `Track ${i + 1}`;
                 subSel.add(new Option(label, i));
             }
@@ -563,21 +568,21 @@ export class HEVCPlayerCore {
     }
 
     switchAudioTrack(index) {
-        if (!this.demuxer.set_audio_track) return;
-        this.demuxer.set_audio_track(index);
+        if (!this.demuxer.setAudioTrack) return;
+        this.demuxer.setAudioTrack(index);
         if (this.audioDecoder && this.audioDecoder.state !== 'closed') {
             this.audioBufferQueue = [];
             this.audioDecoder.reset();
             this.audioDecoder.configure({
                 codec: 'mp4a.40.2',
-                sampleRate: this.demuxer.audio_sample_rate(),
-                numberOfChannels: this.demuxer.audio_channel_count(),
-                description: this.demuxer.audio_codec_config(),
+                sampleRate: this.demuxer.audioSampleRate(),
+                numberOfChannels: this.demuxer.audioChannelCount(),
+                description: this.demuxer.audioCodecConfig(),
             });
-            this.nextAudioSample = this.demuxer.find_audio_sample_at(
+            this.nextAudioSample = this.demuxer.findAudioSampleAt(
                 this.clock.elapsed_us(performance.now())
             );
-            this.totalAudioSamples = this.demuxer.audio_sample_count();
+            this.totalAudioSamples = this.demuxer.audioSampleCount();
         }
     }
 
@@ -588,7 +593,7 @@ export class HEVCPlayerCore {
             this.lastSubText = '';
             return;
         }
-        if (this.demuxer.set_subtitle_track) this.demuxer.set_subtitle_track(index);
+        if (this.demuxer.setSubtitleTrack) this.demuxer.setSubtitleTrack(index);
         this.loadSubtitles();
         this.updateSubtitles(this.clock.elapsed_us(performance.now()));
     }
@@ -596,10 +601,10 @@ export class HEVCPlayerCore {
     // ── Subtitles ──
 
     loadSubtitles() {
-        const count = this.demuxer.subtitle_count();
+        const count = this.demuxer.subtitleCount();
         this.subtitles = [];
         for (let i = 0; i < count; i++) {
-            const evt = this.demuxer.subtitle_event(i);
+            const evt = this.demuxer.subtitleEvent(i);
             if (!evt) continue;
             let text = evt.text;
             const parts = text.split(',');
@@ -634,19 +639,19 @@ export class HEVCPlayerCore {
     // ── Audio ──
 
     async initAudio() {
-        this.totalAudioSamples = this.demuxer.audio_sample_count();
+        this.totalAudioSamples = this.demuxer.audioSampleCount();
         if (this.totalAudioSamples === 0) return;
 
         this.audioCtx = new AudioContext({
-            sampleRate: this.demuxer.audio_sample_rate(),
+            sampleRate: this.demuxer.audioSampleRate(),
         });
         this.audioCtx.suspend();
 
         const config = {
             codec: 'mp4a.40.2',
-            sampleRate: this.demuxer.audio_sample_rate(),
-            numberOfChannels: this.demuxer.audio_channel_count(),
-            description: this.demuxer.audio_codec_config(),
+            sampleRate: this.demuxer.audioSampleRate(),
+            numberOfChannels: this.demuxer.audioChannelCount(),
+            description: this.demuxer.audioCodecConfig(),
         };
 
         const support = await AudioDecoder.isConfigSupported(config);
@@ -682,7 +687,7 @@ export class HEVCPlayerCore {
         if (!this.audioDecoder) return;
         while (this.nextAudioSample < this.totalAudioSamples &&
                this.audioDecoder.decodeQueueSize < 20) {
-            const sample = this.demuxer.read_audio_sample(this.nextAudioSample);
+            const sample = this.demuxer.readAudioSample(this.nextAudioSample);
             if (!sample) break;
             this.nextAudioSample++;
             const chunk = new EncodedAudioChunk({
