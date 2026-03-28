@@ -99,4 +99,11 @@ impl MediaSession {
 
     pub fn has_video_sample(&self, i: u32) -> bool { self.source.has_video_sample(i) }
     pub fn finish(&mut self) { self.source.finish(); }
+
+    // ── Multi-track ──
+
+    pub fn audio_track_count(&self) -> u32 { self.source.audio_track_count() }
+    pub fn audio_track_info(&self, i: u32) -> Option<TrackInfo> { self.source.audio_track_info(i) }
+    pub fn set_audio_track(&mut self, i: u32) { self.source.set_audio_track(i); }
+    pub fn set_subtitle_track(&mut self, i: u32) { self.source.set_subtitle_track(i); }
 }

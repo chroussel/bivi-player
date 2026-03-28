@@ -161,6 +161,9 @@ impl StreamingMkvDemuxer {
     // ── Audio ──
 
     pub fn has_audio(&self) -> bool { !self.audio_tracks.is_empty() }
+    pub fn audio_track_count(&self) -> u32 { self.audio_tracks.len().max(if self.has_audio() { 1 } else { 0 }) as u32 }
+    pub fn audio_track_info(&self, _index: u32) -> Option<crate::mkv::TrackInfo> { None } // TODO: track metadata
+    pub fn set_audio_track(&mut self, _index: u32) { /* TODO */ }
     pub fn audio_sample_rate(&self) -> u32 { self.audio_sample_rate }
     pub fn audio_channel_count(&self) -> u16 { self.audio_channels }
     pub fn audio_codec_config(&self) -> Vec<u8> { self.audio_codec_private.clone() }
@@ -181,6 +184,7 @@ impl StreamingMkvDemuxer {
 
     // ── Subtitles ──
 
+    pub fn set_subtitle_track(&mut self, _index: u32) { /* TODO */ }
     pub fn has_subtitles(&self) -> bool { !self.subtitle_tracks.is_empty() || !self.subtitle_events.is_empty() }
     pub fn subtitle_track_count(&self) -> u32 { self.subtitle_tracks.len().max(if self.subtitle_events.is_empty() { 0 } else { 1 }) as u32 }
     pub fn subtitle_count(&self) -> u32 { self.subtitle_events.len() as u32 }

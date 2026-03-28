@@ -207,6 +207,21 @@ impl MediaSource {
 
     // ── MP4 streaming (sample cache) ──
 
+    // ── Multi-track ──
+
+    pub fn audio_track_count(&self) -> u32 {
+        match &self.inner { Inner::Mkv(d) => d.audio_track_count(), _ => if self.has_audio() { 1 } else { 0 } }
+    }
+    pub fn audio_track_info(&self, i: u32) -> Option<TrackInfo> {
+        match &self.inner { Inner::Mkv(d) => d.audio_track_info(i), _ => None }
+    }
+    pub fn set_audio_track(&mut self, i: u32) {
+        if let Inner::Mkv(d) = &mut self.inner { d.set_audio_track(i); }
+    }
+    pub fn set_subtitle_track(&mut self, i: u32) {
+        if let Inner::Mkv(d) = &mut self.inner { d.set_subtitle_track(i); }
+    }
+
     pub fn has_video_sample(&self, i: u32) -> bool {
         match &self.inner { Inner::Mp4(d) => d.has_video_sample(i), _ => true }
     }
