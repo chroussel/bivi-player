@@ -11,6 +11,7 @@ const pauseBtn = document.getElementById('pause-btn');
 const restartBtn = document.getElementById('restart-btn');
 const timeDisplay = document.getElementById('time');
 const fpsDisplay = document.getElementById('fps');
+const speedSelect = document.getElementById('speed');
 
 let player = null;
 
@@ -31,6 +32,7 @@ class HEVCPlayer {
         this.rafId = null;
         this.width = 0;
         this.height = 0;
+        this.playbackSpeed = 1.0;
         this.pendingDecodes = 0;
         this.flushed = false;
         this.maxBuffer = 30;
@@ -166,6 +168,7 @@ class HEVCPlayer {
             }
             case 'decoded':
                 this.pendingDecodes -= msg.count;
+                if (msg.avgMs) console.log(`[perf] ${msg.count} samples, ${msg.frames} frames, avg ${msg.avgMs}ms/sample`);
                 if (this.playing) this.feedWorker();
                 break;
             case 'flushed':
@@ -253,7 +256,7 @@ class HEVCPlayer {
 
         this.feedWorker();
 
-        const elapsedUs = (performance.now() - this.startTime) * 1000;
+        const elapsedUs = (performance.now() - this.startTime) * 1000 * this.playbackSpeed;
         const MIN_REORDER = 3;
 
         // Consume frames up to current time, keeping reorder margin
@@ -302,6 +305,20 @@ class HEVCPlayer {
         const cur = Math.min(elapsedMs / 1000, this.durationMs / 1000);
         const tot = this.durationMs / 1000;
         timeDisplay.textContent = `${fmtTime(cur)} / ${fmtTime(tot)}`;
+    }
+
+    setSpeed(speed) {
+        if (this.playing) {
+            // Re-anchor so position doesn't jump
+            const now = performance.now();
+            const elapsedUs = (now - this.startTime) * 1000 * this.playbackSpeed;
+            this.playbackSpeed = speed;
+            this.startTime = now - elapsedUs / (speed * 1000);
+        } else {
+            const elapsedUs = this.pauseOffset * 1000 * this.playbackSpeed;
+            this.playbackSpeed = speed;
+            this.pauseOffset = elapsedUs / (speed * 1000);
+        }
     }
 
     renderFrame(f) {
@@ -402,6 +419,11 @@ document.addEventListener('drop', (e) => {
 playBtn.addEventListener('click', () => player?.play());
 pauseBtn.addEventListener('click', () => player?.pause());
 restartBtn.addEventListener('click', () => player?.restart());
+
+// Speed control
+speedSelect.addEventListener('change', () => {
+    player?.setSpeed(parseFloat(speedSelect.value));
+});
 
 // Keyboard
 document.addEventListener('keydown', (e) => {

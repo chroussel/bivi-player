@@ -127,15 +127,16 @@ function collectFrames() {
 }
 
 function decodeSample(data, nalLengthSize, pts) {
-    if (!data || data.length === 0) return 0;
+    if (!data || data.length === 0) return { frames: 0, ms: 0 };
 
+    const t0 = performance.now();
     const sampleData = data instanceof Uint8Array ? data : new Uint8Array(data);
     const ptr = dec._malloc(sampleData.length);
     dec.HEAPU8.set(sampleData, ptr);
     const ret = dec._decoder_push_mp4_sample(ptr, sampleData.length, nalLengthSize, BigInt(pts));
     dec._free(ptr);
 
-    if (ret !== 0) return 0;
+    if (ret !== 0) return { frames: 0, ms: performance.now() - t0 };
 
     let frames = 0;
     let more = 1;
@@ -145,7 +146,7 @@ function decodeSample(data, nalLengthSize, pts) {
         frames += collectFrames();
     }
     frames += collectFrames();
-    return frames;
+    return { frames, ms: performance.now() - t0 };
 }
 
 function flush() {
@@ -188,10 +189,14 @@ onmessage = async (e) => {
 
             case 'samples': {
                 let totalFrames = 0;
+                let totalMs = 0;
                 for (const s of msg.samples) {
-                    totalFrames += decodeSample(s.data, msg.nalLengthSize, s.pts);
+                    const r = decodeSample(s.data, msg.nalLengthSize, s.pts);
+                    totalFrames += r.frames;
+                    totalMs += r.ms;
                 }
-                postMessage({ type: 'decoded', count: msg.samples.length, frames: totalFrames });
+                const avgMs = msg.samples.length > 0 ? (totalMs / msg.samples.length).toFixed(1) : 0;
+                postMessage({ type: 'decoded', count: msg.samples.length, frames: totalFrames, avgMs });
                 break;
             }
 
