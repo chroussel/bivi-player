@@ -18,6 +18,9 @@ export class HEVCPlayerCore {
         this.audioBufferQueue = [];
         this.audioAnchorTime = 0;
         this.audioAnchorElapsed = 0;
+        // Stats
+        this.decodedFrames = 0;
+        this.renderedFrames = 0;
         // Streaming
         this._fetchingData = false;
         this._stillDownloading = true;
@@ -26,6 +29,8 @@ export class HEVCPlayerCore {
         this._lastSubCount = 0;
         this._lastSubHtml = '';
     }
+
+    get durationMs() { return this.session?.duration_ms() ?? 0; }
 
     _setStatus(text) {
         if (this.dom.status) this.dom.status.textContent = text;
@@ -107,6 +112,7 @@ export class HEVCPlayerCore {
     onWorkerMessage(msg) {
         switch (msg.type) {
             case 'frame': {
+                this.decodedFrames++;
                 this.frameBuffer.push(msg.pts, msg.y, msg.u, msg.v, msg.w, msg.h);
                 // Show first frame as thumbnail
                 if (this._wantThumbnail && this.frameBuffer.len() > 0) {
@@ -222,6 +228,39 @@ export class HEVCPlayerCore {
         this.feedAudioDecoder();
 
         const now = performance.now();
+
+        // After seek: hold clock until first frame is rendered
+        if (this._seekWaitingForFrame) {
+            // Buffer ahead while waiting
+            if (!this._fetchingData && this.session.needs_buffer()) {
+                this._bufferMore();
+            }
+            const MIN_REORDER = 3;
+            let gotFrame = false;
+            while (this.decodedFramesCount() > MIN_REORDER || this.session.flushed()) {
+                if (!this.frameBuffer.pop_frame(Infinity, this.session.flushed())) break;
+                gotFrame = true;
+            }
+            if (gotFrame) {
+                this.renderer.render_current_frame(this.frameBuffer);
+                this.renderedFrames++;
+                // Now restart the clock from the seek position
+                const speed = this.clock.speed();
+                const seekUs = this.clock.elapsed_us(now);
+                this.clock.pause(now);
+                this.clock.reset();
+                this.clock.set_speed(0, speed);
+                this.clock.play(now - seekUs / 1000 / speed);
+                if (this.audioCtx && this.audioCtx.state === 'running') {
+                    this.audioAnchorTime = this.audioCtx.currentTime;
+                    this.audioAnchorElapsed = seekUs;
+                }
+                this._seekWaitingForFrame = false;
+            }
+            this.rafId = requestAnimationFrame(() => this.renderLoop());
+            return;
+        }
+
         const elapsedUs = this.clock.elapsed_us(now);
 
         this.scheduleAudio(elapsedUs);
@@ -243,7 +282,6 @@ export class HEVCPlayerCore {
 
         const MIN_REORDER = 3;
         let frameToShow = null;
-        let skipped = 0;
         while (this.decodedFramesCount() > MIN_REORDER || this.session.flushed()) {
             if (!this.frameBuffer.pop_frame(elapsedUs, this.session.flushed())) break;
             frameToShow = true;
@@ -251,6 +289,7 @@ export class HEVCPlayerCore {
 
         if (frameToShow) {
             this.renderer.render_current_frame(this.frameBuffer);
+            this.renderedFrames++;
             this._fpsFrames = (this._fpsFrames || 0) + 1;
             if (!this._fpsTime) this._fpsTime = now;
             if (now - this._fpsTime >= 1000) {
@@ -345,21 +384,17 @@ export class HEVCPlayerCore {
 
         this._seekTarget = null;
 
-        if (this._seekResume) {
-            this.frameBuffer.set_skip_until(this.clock.elapsed_us(performance.now()));
-            if (this._stillDownloading) this._bufferMore();
-            this.play();
-        } else {
-            this._seekDecoding = true;
-            this.feedWorker();
-            this._seekDecodeCheck();
-        }
+        this.frameBuffer.set_skip_until(this.clock.elapsed_us(performance.now()));
+        if (this._stillDownloading) this._bufferMore();
+
+        // Always decode a frame before resuming — gives the image time to catch up
+        this._seekDecoding = true;
+        this.feedWorker();
+        this._seekDecodeCheck();
     }
 
     async _seekDecodeCheck() {
         if (!this._seekDecoding) return;
-
-        // Update sample count (grows during streaming)
 
         // If no samples available at seek position, buffer more
         while (this._stillDownloading && this.session.next_video_sample() >= this.session.total_video_samples()) {
@@ -373,6 +408,10 @@ export class HEVCPlayerCore {
             this.frameBuffer.pop_frame(Infinity, true);
             this.renderer.render_current_frame(this.frameBuffer);
             this._seekDecoding = false;
+            if (this._seekResume) {
+                this._seekWaitingForFrame = true;
+                this.play();
+            }
             return;
         }
 

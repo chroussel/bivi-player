@@ -774,7 +774,7 @@ fn compute_pts_offset(track: &VideoTrack) -> f64 {
 impl Demuxer {
     #[wasm_bindgen(constructor)]
     pub fn new(data: Vec<u8>) -> Result<Demuxer, JsValue> {
-        console_error_panic_hook::set_once();
+        #[cfg(target_arch = "wasm32")] console_error_panic_hook::set_once();
         let tracks =
             parse_mp4(&data).map_err(|e| JsValue::from_str(&format!("MP4 parse error: {}", e)))?;
 

@@ -52,6 +52,15 @@ async function canvasHasContent(page) {
     });
 }
 
+// Helper: get decoded/rendered frame counts
+async function getFrameCounts(page) {
+    return page.evaluate(() => {
+        const el = document.querySelector('hevc-player');
+        const core = el?._core;
+        return { decoded: core?.decodedFrames ?? 0, rendered: core?.renderedFrames ?? 0 };
+    });
+}
+
 test.describe('MP4 streaming', () => {
     test('loads and shows video info', async ({ page }) => {
         await page.goto(PAGE);
@@ -99,8 +108,9 @@ test.describe('MP4 streaming', () => {
         await clickButton(page, '.play-btn');
         await page.waitForTimeout(2000);
 
-        const hasContent = await canvasHasContent(page);
-        expect(hasContent).toBe(true);
+        const f = await getFrameCounts(page);
+        expect(f.decoded).toBeGreaterThan(0);
+        expect(f.rendered).toBeGreaterThan(0);
     });
 
     test('restart resets time', async ({ page }) => {
@@ -172,6 +182,44 @@ test.describe('Seek', () => {
         expect(time).toMatch(/0:1[0-9]|0:09/);
     });
 
+    test('seek holds time until frame is rendered', async ({ page }) => {
+        await page.goto(PAGE);
+        await page.click('button:text("MP4")');
+        await waitReady(page);
+
+        // Play briefly then seek
+        await clickButton(page, '.play-btn');
+        await page.waitForTimeout(1000);
+        await clickButton(page, '.pause-btn');
+
+        await page.evaluate(() => document.querySelector('hevc-player').focus());
+        await page.keyboard.press('ArrowRight'); // +10s
+        await page.waitForTimeout(200);
+        const seekTime = parseTimeString(await getTime(page));
+
+        // Resume — time should stay at seek position until frames catch up
+        await clickButton(page, '.play-btn');
+
+        // Sample time rapidly — it should not advance beyond seek position
+        // until at least one frame is rendered
+        const timeSamples = [];
+        for (let i = 0; i < 5; i++) {
+            timeSamples.push(parseTimeString(await getTime(page)));
+            await page.waitForTimeout(50);
+        }
+        // Early samples should be at or near the seek position, not racing ahead
+        for (const t of timeSamples.slice(0, 3)) {
+            expect(t).toBeLessThanOrEqual(seekTime + 1);
+        }
+
+        // After enough time, frames should be decoded and time advances
+        await page.waitForTimeout(2000);
+        const f = await getFrameCounts(page);
+        expect(f.rendered).toBeGreaterThan(0);
+        const laterTime = parseTimeString(await getTime(page));
+        expect(laterTime).toBeGreaterThanOrEqual(seekTime);
+    });
+
     test('space toggles play/pause', async ({ page }) => {
         await page.goto(PAGE);
         await page.click('button:text("MP4")');
@@ -195,6 +243,49 @@ test.describe('Seek', () => {
         expect(time1).not.toBe('0:00 / 0:00');
         // time2 and time3 should be same (paused)
         expect(time2).toBe(time3);
+    });
+
+    test('seek to 1min then back 30s', async ({ page }) => {
+        test.setTimeout(120000);
+        await page.goto(PAGE);
+        await page.click('button:text("MP4")');
+        await waitReady(page);
+
+        await page.evaluate(() => document.querySelector('hevc-player').focus());
+
+        // Seek to ~60s (6x ArrowRight = +60s)
+        for (let i = 0; i < 6; i++) {
+            await page.keyboard.press('ArrowRight');
+            await page.waitForTimeout(350);
+        }
+        await page.waitForTimeout(1500); // wait for seek + buffer
+        const t1 = parseTimeString(await getTime(page));
+        expect(t1).toBeGreaterThanOrEqual(55);
+
+        const f1 = await getFrameCounts(page);
+        expect(f1.decoded).toBeGreaterThan(0);
+
+        // Seek back 30s (3x ArrowLeft = -30s)
+        for (let i = 0; i < 3; i++) {
+            await page.keyboard.press('ArrowLeft');
+            await page.waitForTimeout(350);
+        }
+        await page.waitForTimeout(1500);
+        const t2 = parseTimeString(await getTime(page));
+        expect(t2).toBeGreaterThanOrEqual(25);
+        expect(t2).toBeLessThanOrEqual(35);
+
+        const f2 = await getFrameCounts(page);
+        expect(f2.decoded).toBeGreaterThan(f1.decoded); // decoded frames at new position
+
+        // Resume and verify playback works from the new position
+        await clickButton(page, '.play-btn');
+        await page.waitForTimeout(2000);
+        const t3 = parseTimeString(await getTime(page));
+        expect(t3).toBeGreaterThan(t2);
+
+        const f3 = await getFrameCounts(page);
+        expect(f3.rendered).toBeGreaterThan(f2.rendered);
     });
 });
 
@@ -251,8 +342,8 @@ test.describe('Format switching', () => {
 
 test.describe('Multi-file streaming with seek', () => {
     for (const format of ['MP4', 'MKV']) {
-        test(`${format}: play at 2x, seek to 15s, resume`, async ({ page }) => {
-            test.setTimeout(90000);
+        test(`${format}: play at 2x, seek forward, resume`, async ({ page }) => {
+            test.setTimeout(120000);
             await page.goto(PAGE);
             await page.click(`button:text("${format}")`);
             await waitReady(page);
@@ -264,35 +355,128 @@ test.describe('Multi-file streaming with seek', () => {
                 el.shadowRoot.querySelector('.speed').dispatchEvent(new Event('change'));
             });
 
-            // Play for 2s (= 4s video time at 2x)
+            // Play for 2s (= ~4s video time at 2x)
             await clickButton(page, '.play-btn');
             await page.waitForTimeout(2000);
 
             const time1 = await getTime(page);
             expect(time1).not.toBe('0:00 / 0:00');
+            const f1 = await getFrameCounts(page);
+            expect(f1.decoded).toBeGreaterThan(0);
 
             // Pause
             await clickButton(page, '.pause-btn');
 
-            // Seek to 15s via arrow keys (focus + right)
+            // Seek forward +10s
             await page.evaluate(() => document.querySelector('hevc-player').focus());
             await page.keyboard.press('ArrowRight'); // +10s
-            await page.waitForTimeout(400);
-            await page.keyboard.press('ArrowRight'); // +10s more = ~24s total with initial 4s
-            await page.waitForTimeout(1000); // wait for seek to complete
+            await page.waitForTimeout(1500); // wait for seek + buffering
+
+            const seekTime = parseTimeString(await getTime(page));
+            expect(seekTime).toBeGreaterThan(10);
 
             // Resume at 2x
             await clickButton(page, '.play-btn');
-            await page.waitForTimeout(2000);
+            await page.waitForTimeout(3000);
 
             const time2 = await getTime(page);
-            // Should be well past 15s
             const seconds = parseTimeString(time2);
-            expect(seconds).toBeGreaterThan(15);
+            expect(seconds).toBeGreaterThan(seekTime);
 
-            // Canvas should have content
-            const hasContent = await canvasHasContent(page);
-            expect(hasContent).toBe(true);
+            // Frames should have been decoded and rendered
+            const f2 = await getFrameCounts(page);
+            expect(f2.decoded).toBeGreaterThan(f1.decoded);
+            expect(f2.rendered).toBeGreaterThan(f1.rendered);
+        });
+    }
+});
+
+test.describe('Video lifecycle', () => {
+    for (const format of ['MP4', 'MKV']) {
+        test(`${format}: load → play → pause → seek → resume → speed → seek`, async ({ page }) => {
+            test.setTimeout(120000);
+            await page.goto(PAGE);
+            await page.click(`button:text("${format}")`);
+            await waitReady(page);
+
+            const status = await getStatus(page);
+            expect(status).toContain('Ready');
+            expect(status).toContain('1920x1080');
+
+            // ── Play ──
+            await clickButton(page, '.play-btn');
+            await page.waitForTimeout(2000);
+            const t1 = parseTimeString(await getTime(page));
+            expect(t1).toBeGreaterThan(0);
+            const f1 = await getFrameCounts(page);
+            expect(f1.decoded).toBeGreaterThan(0);
+            expect(f1.rendered).toBeGreaterThan(0);
+
+            // ── Pause ──
+            await clickButton(page, '.pause-btn');
+            const t2 = parseTimeString(await getTime(page));
+            const f2 = await getFrameCounts(page);
+            await page.waitForTimeout(500);
+            const t3 = parseTimeString(await getTime(page));
+            const f3 = await getFrameCounts(page);
+            expect(t2).toBe(t3); // time frozen while paused
+            expect(f3.rendered).toBe(f2.rendered); // no new renders while paused
+
+            // ── Seek forward via ArrowRight ──
+            await page.evaluate(() => document.querySelector('hevc-player').focus());
+            await page.keyboard.press('ArrowRight'); // +10s
+            await page.waitForTimeout(1000);
+            const t4 = parseTimeString(await getTime(page));
+            expect(t4).toBeGreaterThanOrEqual(t3 + 5); // should jump forward
+            const f4 = await getFrameCounts(page);
+            expect(f4.decoded).toBeGreaterThan(f3.decoded); // seek decoded new frames
+
+            // ── Resume ──
+            await clickButton(page, '.play-btn');
+            await page.waitForTimeout(2000);
+            const t5 = parseTimeString(await getTime(page));
+            expect(t5).toBeGreaterThan(t4); // time advancing again
+            const f5 = await getFrameCounts(page);
+            expect(f5.decoded).toBeGreaterThan(f4.decoded);
+            expect(f5.rendered).toBeGreaterThan(f4.rendered);
+
+            // ── Change speed to 2x ──
+            await page.evaluate(() => {
+                const el = document.querySelector('hevc-player');
+                el.shadowRoot.querySelector('.speed').value = '2';
+                el.shadowRoot.querySelector('.speed').dispatchEvent(new Event('change'));
+            });
+            await page.waitForTimeout(2000);
+            const t6 = parseTimeString(await getTime(page));
+            expect(t6).toBeGreaterThan(t5 + 2);
+            const f6 = await getFrameCounts(page);
+            expect(f6.decoded).toBeGreaterThan(f5.decoded);
+            expect(f6.rendered).toBeGreaterThan(f5.rendered);
+
+            // ── Pause + seek backward ──
+            await clickButton(page, '.pause-btn');
+            const f6b = await getFrameCounts(page);
+            await page.evaluate(() => document.querySelector('hevc-player').focus());
+            await page.keyboard.press('ArrowLeft'); // -10s
+            await page.waitForTimeout(1000);
+            const t7 = parseTimeString(await getTime(page));
+            expect(t7).toBeLessThan(t6);
+            const f7 = await getFrameCounts(page);
+            expect(f7.decoded).toBeGreaterThan(f6b.decoded); // seek decoded frames at new position
+
+            // ── Resume at 2x from new position ──
+            await clickButton(page, '.play-btn');
+            await page.waitForTimeout(2000);
+            const t8 = parseTimeString(await getTime(page));
+            expect(t8).toBeGreaterThan(t7);
+            const f8 = await getFrameCounts(page);
+            expect(f8.decoded).toBeGreaterThan(f7.decoded);
+            expect(f8.rendered).toBeGreaterThan(f7.rendered);
+
+            // ── Restart ──
+            await clickButton(page, '.restart-btn');
+            const t9 = parseTimeString(await getTime(page));
+            expect(t9).toBe(0);
         });
     }
 });

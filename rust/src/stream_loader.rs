@@ -60,7 +60,7 @@ impl StreamLoader {
     /// Fetches HEAD + first 64KB, detects format, finds moov if MP4.
     #[wasm_bindgen(constructor)]
     pub async fn new(url: String) -> Result<StreamLoader, JsValue> {
-        console_error_panic_hook::set_once();
+        #[cfg(target_arch = "wasm32")] console_error_panic_hook::set_once();
 
         let (file_size, _) = fetch_head(&url).await?;
         if file_size == 0 {

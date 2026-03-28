@@ -3,29 +3,9 @@
 #![deny(clippy::panic)]
 #![forbid(unsafe_code)]
 #![forbid(clippy::unwrap_used)]
-//! A demuxer that can demux Matroska and WebM container files.
+//! Matroska/WebM container parsing internals.
 //!
-//! # Example:
-//! ```no_run
-//! use std::fs::File;
-//! use matroska_demuxer::*;
-//!
-//! let file = File::open("test.mkv").unwrap();
-//! let mut mkv = MatroskaFile::open(file).unwrap();
-//! let video_track = mkv
-//!     .tracks()
-//!     .iter()
-//!     .find(|t| t.track_type() == TrackType::Video)
-//!     .map(|t| t.track_number().get())
-//!     .unwrap();
-//!
-//! let mut frame = Frame::default();
-//! while mkv.next_frame(&mut frame).unwrap() {
-//!     if frame.track == video_track {
-//!         dbg!("video frame found");
-//!     }
-//! }
-//! ```
+//! Used by [`crate::streaming_mkv::StreamingMkvDemuxer`] for incremental MKV demuxing.
 
 use std::{
     collections::{HashMap, VecDeque},

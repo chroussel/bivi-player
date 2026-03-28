@@ -9,3 +9,5 @@
 /rust/codecs/codec-wrapper/target
 /rust/codecs/codec-wrapper/Cargo.lock
 /examples/lib
+node_modules/
+test-results/

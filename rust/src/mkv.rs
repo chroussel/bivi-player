@@ -105,7 +105,7 @@ fn track_info_from(t: &TrackEntry) -> (String, String, String) {
 impl MkvDemuxer {
     #[wasm_bindgen(constructor)]
     pub fn new(data: Vec<u8>) -> Result<MkvDemuxer, JsValue> {
-        console_error_panic_hook::set_once();
+        #[cfg(target_arch = "wasm32")] console_error_panic_hook::set_once();
 
         let cursor = Cursor::new(&data);
         let mut mkv = MatroskaFile::open(cursor)

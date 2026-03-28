@@ -9,7 +9,7 @@ fn read_vint(buf: &[u8], pos: usize) -> Option<(u64, usize)> {
     if b == 0 { return None; }
     let len = b.leading_zeros() as usize + 1;
     if pos + len > buf.len() { return None; }
-    let mut val = (b & (0xFF >> len)) as u64;
+    let mut val = (b & (0xFFu8.wrapping_shr(len as u32))) as u64;
     for i in 1..len {
         val = (val << 8) | buf[pos + i] as u64;
     }

@@ -23,7 +23,7 @@ impl MediaSession {
     /// Create a session: probes URL, detects format, creates demuxer.
     #[wasm_bindgen(constructor)]
     pub async fn new(url: String) -> Result<MediaSession, JsValue> {
-        console_error_panic_hook::set_once();
+        #[cfg(target_arch = "wasm32")] console_error_panic_hook::set_once();
         let loader = StreamLoader::new(url).await?;
         let mut source = MediaSource::new();
         source.init_from_bytes(loader.init_data())?;

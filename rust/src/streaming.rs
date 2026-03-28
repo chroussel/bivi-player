@@ -25,9 +25,13 @@ impl StreamingDemuxer {
     /// Create from moov box data (not the full file).
     #[wasm_bindgen(constructor)]
     pub fn new(moov_data: Vec<u8>) -> Result<StreamingDemuxer, JsValue> {
-        console_error_panic_hook::set_once();
+        #[cfg(target_arch = "wasm32")] console_error_panic_hook::set_once();
+        #[cfg(target_arch = "wasm32")]
         let tracks = demuxer::parse_mp4_moov(&moov_data)
             .map_err(|e| JsValue::from_str(&format!("moov parse error: {}", e)))?;
+        #[cfg(not(target_arch = "wasm32"))]
+        let tracks = demuxer::parse_mp4_moov(&moov_data)
+            .unwrap_or_else(|e| panic!("moov parse error: {}", e));
 
         let v_sample_offsets = tracks.video.build_sample_offsets();
         let v_dts_values = tracks.video.build_dts();

@@ -40,7 +40,7 @@ pub struct StreamingMkvDemuxer {
 impl StreamingMkvDemuxer {
     #[wasm_bindgen(constructor)]
     pub fn new() -> StreamingMkvDemuxer {
-        console_error_panic_hook::set_once();
+        #[cfg(target_arch = "wasm32")] console_error_panic_hook::set_once();
         StreamingMkvDemuxer {
             parser: StreamingMkvParser::new(),
             video_track: 0,

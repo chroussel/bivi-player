@@ -72,7 +72,7 @@ pub struct MediaSource {
 impl MediaSource {
     #[wasm_bindgen(constructor)]
     pub fn new() -> MediaSource {
-        console_error_panic_hook::set_once();
+        #[cfg(target_arch = "wasm32")] console_error_panic_hook::set_once();
         MediaSource { inner: Inner::None }
     }
 
