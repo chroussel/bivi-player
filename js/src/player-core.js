@@ -118,8 +118,8 @@ export class HEVCPlayerCore {
             const trySend = () => {
                 while (sent < maxToSend && this.session.next_video_sample() < this.session.total_video_samples()) {
                     const sample = this.session.read_sample(this.session.next_video_sample());
+                    if (!sample) break;
                     this.session.advance_video_sample();
-                    if (!sample) continue;
                     this.worker.postMessage({
                         type: 'samples',
                         samples: [{ data: sample.data, pts: 0 }],
