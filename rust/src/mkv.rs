@@ -68,8 +68,6 @@ struct SubtitleTrackData {
 
 #[wasm_bindgen]
 pub struct MkvDemuxer {
-    // Video (single track)
-    video_track: u64,
     video_codec_private: Vec<u8>,
     width: u32,
     height: u32,
@@ -188,7 +186,7 @@ impl MkvDemuxer {
         }
 
         Ok(MkvDemuxer {
-            video_track, video_codec_private, width, height,
+            video_codec_private, width, height,
             video_frames, duration_ms,
             audio_tracks, selected_audio: 0,
             subtitle_tracks, selected_subtitle: 0,

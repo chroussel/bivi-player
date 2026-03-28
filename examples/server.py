@@ -47,5 +47,5 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             self.wfile.write(f.read(length))
 
 port = int(sys.argv[1]) if len(sys.argv) > 1 else 8081
-print(f"Serving {ROOT} on http://localhost:{port}")
+print(f"Serving on http://localhost:{port}")
 http.server.HTTPServer(("localhost", port), Handler).serve_forever()
