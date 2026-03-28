@@ -1,4 +1,4 @@
-import wasmInit, { FrameBuffer, PlaybackClock, Renderer, SubtitleEngine, PlayerState, MediaSource, StreamLoader, probe } from './pkg/videoplayer.js';
+import wasmInit, { FrameBuffer, PlaybackClock, Renderer, SubtitleEngine, PlayerState, MediaSession } from './pkg/videoplayer.js';
 export { wasmInit };
 
 
@@ -20,10 +20,7 @@ export class HEVCPlayerCore {
         this.audioAnchorTime = 0;
         this.audioAnchorElapsed = 0;
         // Streaming
-        this.streamLoader = null;
-        this.isStreaming = false;
         this._fetchingData = false;
-        this._lastFetchedSample = 0;
         // Subtitles (Rust engine)
         this.subtitleEngine = null;
         this._lastSubCount = 0;
@@ -49,13 +46,8 @@ export class HEVCPlayerCore {
         this.updateTime(0);
 
         this._setStatus('Connecting...');
-        // Rust StreamLoader: HEAD + probe + moov detection all in Rust
-        this.streamLoader = await new StreamLoader(url);
-
-        // Rust auto-detects format + creates demuxer
-        const mediaSource = new MediaSource();
-        mediaSource.init_from_bytes(this.streamLoader.init_data());
-        this.demuxer = mediaSource;
+        // Rust MediaSession: probe + detect + create demuxer — all in one
+        this.demuxer = await new MediaSession(url);
 
         
         this.state.set_still_downloading(true);
@@ -305,14 +297,13 @@ export class HEVCPlayerCore {
         }
         this.updateSubtitles(elapsedUs);
 
-        // Buffer ahead — for MP4 streaming, check if upcoming samples are fetched
+        // Buffer ahead
         if (!this._fetchingData && this.state.still_downloading()) {
             const next = this.state.next_video_sample();
             const lookAhead = Math.min(next + 240, this.state.total_video_samples());
-            const needsFetch = this.isStreaming
-                ? !this.demuxer.has_video_sample(lookAhead - 1)  // MP4: sample-level check
-                : this.state.needs_buffer();                     // MKV: frame count check
-            if (needsFetch) this._bufferMore();
+            if (lookAhead > next && !this.demuxer.has_video_sample(lookAhead - 1)) {
+                this._bufferMore();
+            }
         }
 
         const MIN_REORDER = 3;
@@ -377,7 +368,6 @@ export class HEVCPlayerCore {
         this.state.set_flushed(false);
         this.state.clear_pending();
         this.state.set_next_video_sample(this.demuxer.find_keyframe_before(targetUs));
-        this._lastFetchedSample = this.state.next_video_sample();
 
         if (this.audioDecoder && this.audioDecoder.state !== 'closed') {
             this.audioBufferQueue = [];
@@ -456,35 +446,16 @@ export class HEVCPlayerCore {
     }
 
     async _bufferMore() {
-        if (this._fetchingData || !this.streamLoader) return;
+        if (this._fetchingData) return;
         this._fetchingData = true;
         try {
-            const chunk = await this.streamLoader.fetch_chunk();
-            if (chunk.length > 0) {
-                // Rust handles format-specific distribution (MKV push or MP4 sample cache)
-                this._lastFetchedSample = this.demuxer.push_chunk(chunk, this._lastFetchedSample);
-            }
-
+            const more = await this.demuxer.buffer_more();
             this.state.set_total_video_samples(this.demuxer.sample_count());
             this.state.set_total_audio_samples(this.demuxer.audio_sample_count());
-
-            if (this.streamLoader.is_done()) {
-                this.demuxer.finish();
-                
+            if (!more) {
                 this.state.set_still_downloading(false);
                 if (this.demuxer.has_subtitles()) this.loadSubtitles();
             }
-        } finally {
-            this._fetchingData = false;
-        }
-    }
-
-    async bufferAhead(fromVideoSample) {
-        if (this._fetchingData || !this.streamLoader) return;
-        this._fetchingData = true;
-        try {
-            const nextIdx = await this.streamLoader.fetchChunk(this.demuxer, fromVideoSample);
-            this._lastFetchedSample = Math.max(this._lastFetchedSample, nextIdx);
         } finally {
             this._fetchingData = false;
         }
@@ -675,9 +646,6 @@ export class HEVCPlayerCore {
         if (this.audioCtx) { this.audioCtx.close(); this.audioCtx = null; }
         this.renderer = null;
         this.subtitleEngine = null;
-        this.streamLoader = null;
-        this.isStreaming = false;
-        this._mkvDownloading = false;
         this._fetchingData = false;
     }
 }
