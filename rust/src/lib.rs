@@ -8,6 +8,7 @@ pub mod renderer;
 mod matroska;
 pub mod mkv;
 pub mod streaming;
+pub mod streaming_mkv;
 
 pub use demuxer::*;
 pub use frame_buffer::*;
@@ -15,3 +16,4 @@ pub use clock::*;
 pub use renderer::*;
 pub use mkv::*;
 pub use streaming::*;
+pub use streaming_mkv::*;

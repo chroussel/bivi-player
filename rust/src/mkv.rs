@@ -18,6 +18,12 @@ pub struct SubtitleEvent {
     text: String,
 }
 
+impl SubtitleEvent {
+    pub fn new(start_us: f64, duration_us: f64, text: String) -> Self {
+        SubtitleEvent { start_us, duration_us, text }
+    }
+}
+
 #[wasm_bindgen]
 impl SubtitleEvent {
     #[wasm_bindgen(getter)]

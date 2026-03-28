@@ -1,4 +1,4 @@
-import wasmInit, { Demuxer, MkvDemuxer, StreamingDemuxer, FrameBuffer, PlaybackClock, Renderer } from './pkg/videoplayer.js';
+import wasmInit, { Demuxer, MkvDemuxer, StreamingDemuxer, StreamingMkvDemuxer, FrameBuffer, PlaybackClock, Renderer } from './pkg/videoplayer.js';
 export { wasmInit };
 import { StreamLoader } from './stream-loader.js';
 
@@ -103,6 +103,76 @@ export class HEVCPlayerCore {
         }
 
         await this._postInit();
+    }
+
+    async loadStreamMkv(url) {
+        this._setStatus('Initializing...');
+        await wasmInit();
+
+        this.renderer = new Renderer(this.canvas);
+        this.frameBuffer = new FrameBuffer(50, 3);
+        this.clock = new PlaybackClock();
+
+        this._setStatus('Streaming MKV...');
+        this.demuxer = new StreamingMkvDemuxer();
+        this.isMkv = true;
+
+        // Stream data progressively via ReadableStream
+        const resp = await fetch(url);
+        if (!resp.ok) throw new Error(`Fetch failed: ${resp.status}`);
+        const total = parseInt(resp.headers.get('Content-Length') || '0');
+        const reader = resp.body.getReader();
+
+        // Read chunks until header is parsed
+        let headerReady = false;
+        while (!headerReady) {
+            const { done, value } = await reader.read();
+            if (done) break;
+            headerReady = this.demuxer.push_data(value);
+            if (total) {
+                this._setStatus(`Buffering... ${(this.demuxer.sample_count())} frames`);
+            }
+        }
+
+        if (!headerReady) throw new Error('Could not parse MKV header');
+
+        this.canvas.width = this.demuxer.width();
+        this.canvas.height = this.demuxer.height();
+        this.totalSamples = this.demuxer.sample_count();
+        this.durationMs = this.demuxer.duration_ms();
+        this.nalLengthSize = this.demuxer.nal_length_size();
+
+        this._setStatus(`Video: ${this.demuxer.width()}x${this.demuxer.height()}, ${(this.durationMs / 1000).toFixed(1)}s (streaming MKV)`);
+
+        await this._initDecoder();
+
+        // Keep downloading in the background
+        this._mkvReader = reader;
+        this._mkvDownloading = true;
+        this._downloadMkvBackground();
+
+        await this._postInit();
+    }
+
+    async _downloadMkvBackground() {
+        const reader = this._mkvReader;
+        while (true) {
+            const { done, value } = await reader.read();
+            if (done) break;
+            this.demuxer.push_data(value);
+            // Update total sample count as new frames are parsed
+            this.totalSamples = this.demuxer.sample_count();
+            this.totalAudioSamples = this.demuxer.audio_sample_count();
+        }
+        this.demuxer.finish();
+        this.totalSamples = this.demuxer.sample_count();
+        this.totalAudioSamples = this.demuxer.audio_sample_count();
+        this._mkvDownloading = false;
+
+        // Reload subtitles now that all data is available
+        if (this.demuxer.has_subtitles?.()) {
+            this.loadSubtitles();
+        }
     }
 
     async _initDecoder() {
