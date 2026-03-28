@@ -14,7 +14,7 @@ int decoder_init(void) {
     ctx = de265_new_decoder();
     if (!ctx) return -1;
     // Use multiple threads for parallel CTB row decoding
-    de265_start_worker_threads(ctx, 4);
+    de265_start_worker_threads(ctx, 8);
     return 0;
 }
 

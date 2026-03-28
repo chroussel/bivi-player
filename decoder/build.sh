@@ -47,7 +47,7 @@ em++ -O3 -msimd128 \
   -s NO_FILESYSTEM=1 \
   -s ENVIRONMENT=web,worker \
   -s EXPORT_ES6=1 \
-  -s PTHREAD_POOL_SIZE=4 \
+  -s PTHREAD_POOL_SIZE=8 \
   $SOURCES \
   decoder/wrapper.c \
   -o "$OUT_DIR/decoder.js"
