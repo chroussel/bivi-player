@@ -1,5 +1,6 @@
-import wasmInit, { Demuxer, MkvDemuxer, TrackInfo, FrameBuffer, PlaybackClock, Renderer } from './pkg/videoplayer.js';
+import wasmInit, { Demuxer, MkvDemuxer, StreamingDemuxer, TrackInfo, FrameBuffer, PlaybackClock, Renderer } from './pkg/videoplayer.js';
 import { debounce, accumulatedDebounce } from './debounce.js';
+import { StreamLoader } from './stream-loader.js';
 
 const dropZone = document.getElementById('drop-zone');
 const fileInput = document.getElementById('file-input');
@@ -43,6 +44,11 @@ class HEVCPlayer {
         this.audioBufferQueue = []; // { pts, audioBuffer }
         this.audioAnchorTime = 0;    // audioCtx.currentTime at anchor
         this.audioAnchorElapsed = 0; // video elapsed_us at anchor
+        // Streaming
+        this.streamLoader = null;
+        this.isStreaming = false;
+        this._fetchingData = false;
+        this._lastFetchedSample = 0;
         // Subtitles
         this.subtitles = [];
         this.subtitleEl = document.getElementById('subtitles');
@@ -119,6 +125,83 @@ class HEVCPlayer {
         this.populateTrackSelectors();
 
         status.textContent = status.textContent.replace(/ — .*/, '') + ' — Ready';
+    }
+
+    async loadStream(url) {
+        status.textContent = 'Initializing...';
+        await wasmInit();
+
+        this.renderer = new Renderer(this.canvas);
+        this.frameBuffer = new FrameBuffer(50, 3);
+        this.clock = new PlaybackClock();
+
+        // Fetch moov via Range requests
+        status.textContent = 'Fetching headers...';
+        this.streamLoader = new StreamLoader(url);
+        await this.streamLoader.init();
+
+        status.textContent = 'Parsing metadata...';
+        this.demuxer = new StreamingDemuxer(this.streamLoader.moovData);
+        this.isStreaming = true;
+
+        this.canvas.width = this.demuxer.width();
+        this.canvas.height = this.demuxer.height();
+        this.totalSamples = this.demuxer.sample_count();
+        this.durationMs = this.demuxer.duration_ms();
+        this.nalLengthSize = this.demuxer.nal_length_size();
+
+        status.textContent = `Video: ${this.demuxer.width()}x${this.demuxer.height()}, ${this.totalSamples} frames, ${(this.durationMs / 1000).toFixed(1)}s (streaming)`;
+
+        // Start decoder worker
+        status.textContent += ' — Loading decoder...';
+        this.worker = new Worker('./decode-worker.js', { type: 'module' });
+
+        await new Promise((resolve, reject) => {
+            const timeout = setTimeout(() => reject(new Error('Decoder init timed out')), 10000);
+            this.worker.onmessage = (e) => {
+                if (e.data.type === 'ready') { clearTimeout(timeout); resolve(); }
+                if (e.data.type === 'error') console.error('[decoder]', e.data.msg);
+                if (e.data.type === 'log') console.log('[decoder]', e.data.msg);
+            };
+            this.worker.onerror = (e) => { clearTimeout(timeout); reject(e); };
+            const config = this.demuxer.codec_description();
+            this.worker.postMessage({ type: 'init', codec: 'hevc', config });
+        });
+
+        this.worker.onmessage = (e) => this.onWorkerMessage(e.data);
+
+        // Buffer first few chunks for thumbnail + initial playback (~3MB)
+        this._lastFetchedSample = 0;
+        for (let i = 0; i < 3; i++) {
+            await this.bufferAhead(this._lastFetchedSample);
+        }
+
+        status.textContent = status.textContent.replace(/ — .*/, '') + ' — Decoding thumbnail...';
+        await this.decodeFirstFrame();
+
+        this.nextSample = 0;
+        this.pendingDecodes = 0;
+        this.frameBuffer.reset();
+        const config2 = this.demuxer.codec_description();
+        this.worker.postMessage({ type: 'reset', config: config2 });
+
+        // Init audio
+        if (this.demuxer.has_audio() && typeof AudioDecoder !== 'undefined') {
+            await this.initAudio();
+        }
+
+        status.textContent = status.textContent.replace(/ — .*/, '') + ' — Ready';
+    }
+
+    async bufferAhead(fromVideoSample) {
+        if (this._fetchingData || !this.streamLoader) return;
+        this._fetchingData = true;
+        try {
+            const nextIdx = await this.streamLoader.fetchChunk(this.demuxer, fromVideoSample);
+            this._lastFetchedSample = Math.max(this._lastFetchedSample, nextIdx);
+        } finally {
+            this._fetchingData = false;
+        }
     }
 
     async decodeFirstFrame() {
@@ -216,8 +299,8 @@ class HEVCPlayer {
 
         for (let i = 0; i < batchSize; i++) {
             const sample = this.demuxer.read_sample(this.nextSample);
+            if (!sample) break; // stop at missing sample (streaming: not yet fetched)
             this.nextSample++;
-            if (!sample) continue;
             samples.push({
                 data: sample.data,
                 pts: Math.round(sample.timestamp_us),
@@ -287,6 +370,14 @@ class HEVCPlayer {
         this.feedWorker();
         this.feedAudioDecoder();
 
+        // Streaming: fetch next 1MB chunk when buffer runs low (~10s ahead)
+        if (this.isStreaming && !this._fetchingData) {
+            const bufferedAhead = this._lastFetchedSample - this.nextSample;
+            if (bufferedAhead < 240 && this._lastFetchedSample < this.totalSamples) { // 240 = ~10s at 24fps
+                this.bufferAhead(this._lastFetchedSample);
+            }
+        }
+
         const now = performance.now();
         const elapsedUs = this.clock.elapsed_us(now);
 
@@ -348,6 +439,7 @@ class HEVCPlayer {
         this.flushed = false;
         this.pendingDecodes = 0;
         this.nextSample = this.demuxer.find_keyframe_before(targetUs);
+        this._lastFetchedSample = this.nextSample;
 
         // Reset audio
         if (this.audioDecoder && this.audioDecoder.state !== 'closed') {
@@ -588,8 +680,8 @@ class HEVCPlayer {
         while (this.nextAudioSample < this.totalAudioSamples &&
                this.audioDecoder.decodeQueueSize < 20) {
             const sample = this.demuxer.read_audio_sample(this.nextAudioSample);
+            if (!sample) break; // stop at missing sample (streaming: not yet fetched)
             this.nextAudioSample++;
-            if (!sample) continue;
             const chunk = new EncodedAudioChunk({
                 type: 'key', // AAC frames are always keyframes
                 timestamp: sample.timestamp_us,
@@ -696,11 +788,34 @@ async function loadUrl(url) {
     }
 }
 
+async function loadStreamUrl(url) {
+    if (player) player.destroy();
+
+    dropZone.classList.add('loading');
+    status.textContent = 'Connecting...';
+    playerContainer.classList.add('visible');
+
+    try {
+        player = new HEVCPlayer(canvas);
+        await player.loadStream(url);
+        dropZone.classList.remove('loading');
+        dropZone.classList.add('hidden');
+    } catch (e) {
+        dropZone.classList.remove('loading');
+        status.textContent = `Error: ${e.message || e}`;
+        console.error(e);
+    }
+}
+
 document.getElementById('load-sample-mp4')?.addEventListener('click', () => {
     loadUrl('./data/hellmode12_2m.mp4');
 });
 document.getElementById('load-sample-mkv')?.addEventListener('click', () => {
     loadUrl('./data/hellmode12_2m.mkv');
+});
+
+document.getElementById('stream-sample')?.addEventListener('click', () => {
+    loadStreamUrl('./data/hellmode12_2m.mp4');
 });
 
 fileInput.addEventListener('change', (e) => {

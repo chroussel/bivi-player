@@ -619,9 +619,41 @@ fn parse_audio_trak(data: &[u8], trak_start: usize, trak_end: usize) -> Option<A
     })
 }
 
-struct Mp4Tracks {
-    video: VideoTrack,
-    audio: Option<AudioTrack>,
+pub struct Mp4Tracks {
+    pub video: VideoTrack,
+    pub audio: Option<AudioTrack>,
+}
+
+/// Parse from moov box data directly (for streaming — moov fetched separately).
+pub fn parse_mp4_moov(moov_data: &[u8]) -> Result<Mp4Tracks, String> {
+    // moov_data IS the moov content — scan for trak boxes inside it
+    let mut video = None;
+    let mut audio = None;
+    for (box_type, start, end) in find_boxes(moov_data, 0, moov_data.len()) {
+        if box_type == TRAK {
+            if video.is_none() {
+                if let Some(t) = parse_trak(moov_data, start, end) { video = Some(t); continue; }
+            }
+            if audio.is_none() {
+                if let Some(t) = parse_audio_trak(moov_data, start, end) { audio = Some(t); }
+            }
+        }
+    }
+    let video = video.ok_or("no HEVC video track in moov")?;
+    Ok(Mp4Tracks { video, audio })
+}
+
+pub fn compute_pts_offset_for(track: &VideoTrack, dts_values: &[u64]) -> f64 {
+    let count = track.sample_count();
+    let mut min_pts = f64::MAX;
+    for i in 0..count {
+        let dts = dts_values[i] as f64;
+        let cts = if i < track.composition_offsets.len() {
+            track.composition_offsets[i] as f64
+        } else { 0.0 };
+        if dts + cts < min_pts { min_pts = dts + cts; }
+    }
+    if min_pts == f64::MAX { 0.0 } else { min_pts }
 }
 
 fn parse_mp4(data: &[u8]) -> Result<Mp4Tracks, String> {
