@@ -11,7 +11,6 @@ export class HEVCPlayerCore {
         this.worker = null;
         this.frameBuffer = null;
         this.clock = null;
-        this.state = null; // PlayerState (Rust)
         this.rafId = null;
         // Audio (browser APIs — must stay JS)
         this.audioCtx = null;
