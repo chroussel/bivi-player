@@ -316,9 +316,9 @@ pub struct MkvFrameIter<R: Read> {
     timecode_scale: u64,
     cluster_timestamp: u64,
     in_cluster: bool,
-    // For BlockGroup
     pending_block: Option<(u64, i16, bool, Vec<u8>)>,
     pending_duration: Option<u64>,
+    bytes_consumed: u64,
 }
 
 impl<R: Read> MkvFrameIter<R> {
@@ -327,15 +327,29 @@ impl<R: Read> MkvFrameIter<R> {
             reader,
             timecode_scale,
             cluster_timestamp: 0,
-            in_cluster: true, // We stopped at a Cluster in parse_mkv_header
+            in_cluster: true,
             pending_block: None,
             pending_duration: None,
+            bytes_consumed: 0,
         }
+    }
+
+    pub fn set_cluster_timestamp(&mut self, ts: u64) {
+        self.cluster_timestamp = ts;
+    }
+
+    pub fn cluster_timestamp(&self) -> u64 {
+        self.cluster_timestamp
+    }
+
+    pub fn bytes_consumed(&self) -> u64 {
+        self.bytes_consumed
     }
 
     pub fn next_frame(&mut self) -> Option<MkvFrame> {
         loop {
             let hdr = read_element_header(&mut self.reader)?;
+            self.bytes_consumed += hdr.header_len as u64;
             let size = match hdr.size {
                 Some(s) => s,
                 None => {
@@ -356,10 +370,12 @@ impl<R: Read> MkvFrameIter<R> {
                 }
                 CLUSTER_TIMESTAMP_ID => {
                     self.cluster_timestamp = read_uint(&mut self.reader, size as usize)?;
+                    self.bytes_consumed += size;
                     continue;
                 }
                 SIMPLE_BLOCK_ID => {
                     let data = read_bytes(&mut self.reader, size as usize)?;
+                    self.bytes_consumed += size;
                     let (track, rel_ts, keyframe, frame_data) = parse_simple_block(&data)?;
                     let abs_ts = self.cluster_timestamp as i64 + rel_ts as i64;
                     let timestamp_ns = abs_ts * self.timecode_scale as i64;
@@ -372,8 +388,8 @@ impl<R: Read> MkvFrameIter<R> {
                     });
                 }
                 BLOCK_GROUP_ID => {
-                    // Read children: Block + optional BlockDuration
                     let group_data = read_bytes(&mut self.reader, size as usize)?;
+                    self.bytes_consumed += size;
                     let mut gc = &group_data[..];
                     let mut block_data = None;
                     let mut block_dur = None;
@@ -402,8 +418,8 @@ impl<R: Read> MkvFrameIter<R> {
                     continue;
                 }
                 _ => {
-                    // Skip unknown elements
                     skip(&mut self.reader, size).ok()?;
+                    self.bytes_consumed += size;
                     continue;
                 }
             }

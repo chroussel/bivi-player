@@ -35,8 +35,9 @@ pub struct StreamingMkvDemuxer {
     audio_codec_private: Vec<u8>,
     duration_ms: f64,
 
-    // How far we've parsed
+    // Parser state preserved between push_data calls
     header_parsed: bool,
+    cluster_timestamp: u64,
 }
 
 struct FrameData {
@@ -70,6 +71,7 @@ impl StreamingMkvDemuxer {
             audio_codec_private: Vec::new(),
             duration_ms: 0.0,
             header_parsed: false,
+            cluster_timestamp: 0,
         }
     }
 
@@ -148,6 +150,7 @@ impl StreamingMkvDemuxer {
 
         let mut cursor = Cursor::new(remaining);
         let mut iter = MkvFrameIter::new(&mut cursor, self.timecode_scale);
+        iter.set_cluster_timestamp(self.cluster_timestamp);
 
         while let Some(frame) = iter.next_frame() {
             let ts_us = frame.timestamp_ns as f64 / 1_000.0;
@@ -173,8 +176,10 @@ impl StreamingMkvDemuxer {
             }
         }
 
-        // Update consumed position
-        self.bytes_consumed += cursor.position() as usize;
+        // Save state for next call
+        let consumed = iter.bytes_consumed();
+        self.cluster_timestamp = iter.cluster_timestamp();
+        self.bytes_consumed += consumed as usize;
     }
 
     // ── Video ──

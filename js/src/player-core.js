@@ -146,12 +146,12 @@ export class HEVCPlayerCore {
 
         await this._initDecoder();
 
-        // Keep downloading in the background
+        await this._postInit();
+
+        // Start background download AFTER init (avoids borrow conflict)
         this._mkvReader = reader;
         this._mkvDownloading = true;
         this._downloadMkvBackground();
-
-        await this._postInit();
     }
 
     async _downloadMkvBackground() {
