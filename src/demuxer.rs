@@ -24,6 +24,9 @@ const HEV1: u32 = fourcc(b"hev1");
 const HVC1: u32 = fourcc(b"hvc1");
 const HVCC: u32 = fourcc(b"hvcC");
 const VIDE: u32 = fourcc(b"vide");
+const SOUN: u32 = fourcc(b"soun");
+const MP4A: u32 = fourcc(b"mp4a");
+const ESDS: u32 = fourcc(b"esds");
 
 struct BoxHeader {
     box_type: u32,
@@ -142,6 +145,63 @@ impl VideoTrack {
     }
 }
 
+pub(crate) struct AudioTrack {
+    pub timescale: u32,
+    pub duration: u64,
+    pub sample_rate: u32,
+    pub channel_count: u16,
+    pub codec_config: Vec<u8>, // AudioSpecificConfig from esds
+    pub sample_sizes: Vec<u32>,
+    pub chunk_offsets: Vec<u64>,
+    stsc_entries: Vec<StscEntry>,
+    pub sample_durations: Vec<u32>,
+}
+
+impl AudioTrack {
+    pub fn sample_count(&self) -> usize { self.sample_sizes.len() }
+
+    pub fn build_sample_offsets(&self) -> Vec<u64> {
+        let count = self.sample_count();
+        let mut offsets = vec![0u64; count];
+        let total_chunks = self.chunk_offsets.len() as u32;
+        let mut sample_idx = 0usize;
+        for (i, entry) in self.stsc_entries.iter().enumerate() {
+            let next_first = if i + 1 < self.stsc_entries.len() {
+                self.stsc_entries[i + 1].first_chunk
+            } else { total_chunks + 1 };
+            for chunk_num in entry.first_chunk..next_first {
+                let chunk_offset = self.chunk_offsets[(chunk_num - 1) as usize];
+                let mut offset = chunk_offset;
+                for _ in 0..entry.samples_per_chunk {
+                    if sample_idx >= count { break; }
+                    offsets[sample_idx] = offset;
+                    offset += self.sample_sizes[sample_idx] as u64;
+                    sample_idx += 1;
+                }
+            }
+        }
+        offsets
+    }
+
+    pub fn build_dts(&self) -> Vec<u64> {
+        let count = self.sample_count();
+        let mut dts_values = Vec::with_capacity(count);
+        let mut dts = 0u64;
+        for (i, &dur) in self.sample_durations.iter().enumerate() {
+            if i >= count { break; }
+            dts_values.push(dts);
+            dts += dur as u64;
+        }
+        if let Some(&last) = self.sample_durations.last() {
+            while dts_values.len() < count {
+                dts_values.push(dts);
+                dts += last as u64;
+            }
+        }
+        dts_values
+    }
+}
+
 // ── Box scanning ──
 
 fn find_boxes(data: &[u8], start: usize, end: usize) -> Vec<(u32, usize, usize)> {
@@ -246,6 +306,88 @@ fn parse_stsd_hevc(
     } else {
         None
     }
+}
+
+/// Parse audio sample description — returns (sample_rate, channel_count, codec_config)
+fn parse_stsd_aac(
+    content: &[u8],
+    file_data: &[u8],
+    stsd_file_start: usize,
+) -> Option<(u32, u16, Vec<u8>)> {
+    let mut buf = content;
+    read_fullbox(&mut buf)?;
+    if buf.remaining() < 4 { return None; }
+    let entry_count = buf.get_u32();
+    if entry_count == 0 { return None; }
+    let before_entry = buf.remaining();
+    let entry_hdr = read_box_header(&mut buf)?;
+    if entry_hdr.box_type != MP4A { return None; }
+    // AudioSampleEntry: 6 reserved + 2 data_ref_index + 8 reserved + 2 channels + 2 sample_size + 2 pre_defined + 2 reserved + 4 sample_rate
+    if buf.remaining() < 28 { return None; }
+    buf.advance(6 + 2); // reserved + data_reference_index
+    buf.advance(8); // reserved
+    let channel_count = buf.get_u16();
+    buf.advance(2 + 2 + 2); // sample_size + pre_defined + reserved
+    let sample_rate = buf.get_u32() >> 16; // fixed-point 16.16
+
+    // Find esds sub-box
+    let consumed = content.len() - before_entry + entry_hdr.header_size as usize + 28;
+    let sub_start = stsd_file_start + consumed;
+    let entry_end = stsd_file_start + (content.len() - before_entry) + entry_hdr.size as usize;
+
+    if let Some((esds_start, esds_end)) = find_box(file_data, sub_start, entry_end, ESDS) {
+        let esds_data = &file_data[esds_start..esds_end];
+        // Extract AudioSpecificConfig from esds
+        let asc = extract_audio_specific_config(esds_data);
+        Some((sample_rate, channel_count, asc))
+    } else {
+        None
+    }
+}
+
+/// Extract AudioSpecificConfig from esds box content
+fn extract_audio_specific_config(esds: &[u8]) -> Vec<u8> {
+    // esds is a FullBox: version(1) + flags(3) + ES_Descriptor
+    if esds.len() < 4 { return Vec::new(); }
+    let mut pos = 4usize; // skip version + flags
+
+    // Walk through ES_Descriptor tags to find DecoderSpecificInfo (tag 0x05)
+    // Tags: 0x03 = ES_Descriptor, 0x04 = DecoderConfigDescriptor, 0x05 = DecoderSpecificInfo
+    fn read_descr_len(data: &[u8], pos: &mut usize) -> usize {
+        let mut len = 0usize;
+        for _ in 0..4 {
+            if *pos >= data.len() { return len; }
+            let b = data[*pos];
+            *pos += 1;
+            len = (len << 7) | (b & 0x7F) as usize;
+            if b & 0x80 == 0 { break; }
+        }
+        len
+    }
+
+    while pos < esds.len() {
+        let tag = esds[pos];
+        pos += 1;
+        let len = read_descr_len(esds, &mut pos);
+        if tag == 0x05 {
+            // DecoderSpecificInfo — this IS the AudioSpecificConfig
+            let end = (pos + len).min(esds.len());
+            return esds[pos..end].to_vec();
+        }
+        if tag == 0x03 {
+            // ES_Descriptor: skip ES_ID(2) + flags(1)
+            if pos + 3 <= esds.len() { pos += 3; }
+            continue; // next tag inside
+        }
+        if tag == 0x04 {
+            // DecoderConfigDescriptor: skip objectTypeIndication(1) + streamType(1) + bufferSizeDB(3) + maxBitrate(4) + avgBitrate(4)
+            if pos + 13 <= esds.len() { pos += 13; }
+            continue; // next tag (should be 0x05)
+        }
+        // Unknown tag — skip
+        pos += len;
+    }
+    Vec::new()
 }
 
 fn parse_stts(content: &[u8]) -> Option<Vec<u32>> {
@@ -444,16 +586,60 @@ fn parse_trak(data: &[u8], trak_start: usize, trak_end: usize) -> Option<VideoTr
     })
 }
 
-fn parse_mp4(data: &[u8]) -> Result<VideoTrack, String> {
+fn parse_audio_trak(data: &[u8], trak_start: usize, trak_end: usize) -> Option<AudioTrack> {
+    let (mdia_s, mdia_e) = find_box(data, trak_start, trak_end, MDIA)?;
+    let mdia_boxes = find_boxes(data, mdia_s, mdia_e);
+    let &(_, hdlr_s, hdlr_e) = mdia_boxes.iter().find(|(t, _, _)| *t == HDLR)?;
+    if parse_hdlr(&data[hdlr_s..hdlr_e])? != SOUN { return None; }
+    let &(_, mdhd_s, mdhd_e) = mdia_boxes.iter().find(|(t, _, _)| *t == MDHD)?;
+    let (timescale, duration) = parse_mdhd(&data[mdhd_s..mdhd_e])?;
+    let (minf_s, minf_e) = find_box(data, mdia_s, mdia_e, MINF)?;
+    let (stbl_s, stbl_e) = find_box(data, minf_s, minf_e, STBL)?;
+    let stbl_boxes = find_boxes(data, stbl_s, stbl_e);
+    let get = |bt: u32| -> Option<(usize, usize)> {
+        stbl_boxes.iter().find(|(t, _, _)| *t == bt).map(|(_, s, e)| (*s, *e))
+    };
+    let (stsd_s, stsd_e) = get(STSD)?;
+    let (sample_rate, channel_count, codec_config) =
+        parse_stsd_aac(&data[stsd_s..stsd_e], data, stsd_s)?;
+    let (stts_s, stts_e) = get(STTS)?;
+    let sample_durations = parse_stts(&data[stts_s..stts_e])?;
+    let (stsc_s, stsc_e) = get(STSC)?;
+    let stsc_entries = parse_stsc(&data[stsc_s..stsc_e])?;
+    let (stsz_s, stsz_e) = get(STSZ)?;
+    let sample_sizes = parse_stsz(&data[stsz_s..stsz_e])?;
+    let chunk_offsets = if let Some((s, e)) = get(STCO) {
+        parse_stco(&data[s..e])?
+    } else if let Some((s, e)) = get(CO64) {
+        parse_co64(&data[s..e])?
+    } else { return None; };
+    Some(AudioTrack {
+        timescale, duration, sample_rate, channel_count, codec_config,
+        sample_sizes, chunk_offsets, stsc_entries, sample_durations,
+    })
+}
+
+struct Mp4Tracks {
+    video: VideoTrack,
+    audio: Option<AudioTrack>,
+}
+
+fn parse_mp4(data: &[u8]) -> Result<Mp4Tracks, String> {
     let (moov_s, moov_e) = find_box(data, 0, data.len(), MOOV).ok_or("no moov box found")?;
+    let mut video = None;
+    let mut audio = None;
     for (box_type, start, end) in find_boxes(data, moov_s, moov_e) {
         if box_type == TRAK {
-            if let Some(track) = parse_trak(data, start, end) {
-                return Ok(track);
+            if video.is_none() {
+                if let Some(t) = parse_trak(data, start, end) { video = Some(t); continue; }
+            }
+            if audio.is_none() {
+                if let Some(t) = parse_audio_trak(data, start, end) { audio = Some(t); }
             }
         }
     }
-    Err("no HEVC video track found".into())
+    let video = video.ok_or("no HEVC video track found")?;
+    Ok(Mp4Tracks { video, audio })
 }
 
 fn build_codec_string(hvcc: &[u8], codec_fourcc: u32) -> String {
@@ -521,10 +707,29 @@ impl Sample {
 #[wasm_bindgen]
 pub struct Demuxer {
     data: Vec<u8>,
-    track: VideoTrack,
-    sample_offsets: Vec<u64>,
-    dts_values: Vec<u64>,
-    pts_offset: f64,
+    // Video
+    video: VideoTrack,
+    v_sample_offsets: Vec<u64>,
+    v_dts_values: Vec<u64>,
+    v_pts_offset: f64,
+    // Audio
+    audio: Option<AudioTrack>,
+    a_sample_offsets: Vec<u64>,
+    a_dts_values: Vec<u64>,
+}
+
+fn compute_pts_offset(track: &VideoTrack) -> f64 {
+    let count = track.sample_count();
+    let dts_values = track.build_dts();
+    let mut min_pts = f64::MAX;
+    for i in 0..count {
+        let dts = dts_values[i] as f64;
+        let cts = if i < track.composition_offsets.len() {
+            track.composition_offsets[i] as f64
+        } else { 0.0 };
+        if dts + cts < min_pts { min_pts = dts + cts; }
+    }
+    if min_pts == f64::MAX { 0.0 } else { min_pts }
 }
 
 #[wasm_bindgen]
@@ -532,68 +737,110 @@ impl Demuxer {
     #[wasm_bindgen(constructor)]
     pub fn new(data: Vec<u8>) -> Result<Demuxer, JsValue> {
         console_error_panic_hook::set_once();
-        let track =
+        let tracks =
             parse_mp4(&data).map_err(|e| JsValue::from_str(&format!("MP4 parse error: {}", e)))?;
-        let sample_offsets = track.build_sample_offsets();
-        let dts_values = track.build_dts();
-        let count = track.sample_count();
-        let mut min_pts = f64::MAX;
-        for i in 0..count {
-            let dts = dts_values[i] as f64;
-            let cts = if i < track.composition_offsets.len() {
-                track.composition_offsets[i] as f64
-            } else {
-                0.0
-            };
-            if dts + cts < min_pts {
-                min_pts = dts + cts;
-            }
-        }
-        if min_pts == f64::MAX {
-            min_pts = 0.0;
-        }
-        Ok(Demuxer { data, track, sample_offsets, dts_values, pts_offset: min_pts })
+
+        let v_sample_offsets = tracks.video.build_sample_offsets();
+        let v_dts_values = tracks.video.build_dts();
+        let v_pts_offset = compute_pts_offset(&tracks.video);
+
+        let (a_sample_offsets, a_dts_values) = if let Some(ref a) = tracks.audio {
+            (a.build_sample_offsets(), a.build_dts())
+        } else {
+            (Vec::new(), Vec::new())
+        };
+
+        Ok(Demuxer {
+            data,
+            video: tracks.video,
+            v_sample_offsets, v_dts_values, v_pts_offset,
+            audio: tracks.audio,
+            a_sample_offsets, a_dts_values,
+        })
     }
 
-    pub fn width(&self) -> u32 { self.track.width as u32 }
-    pub fn height(&self) -> u32 { self.track.height as u32 }
-    pub fn sample_count(&self) -> u32 { self.track.sample_count() as u32 }
+    // ── Video API ──
+
+    pub fn width(&self) -> u32 { self.video.width as u32 }
+    pub fn height(&self) -> u32 { self.video.height as u32 }
+    pub fn sample_count(&self) -> u32 { self.video.sample_count() as u32 }
 
     pub fn duration_ms(&self) -> f64 {
-        if self.track.timescale == 0 { return 0.0; }
-        (self.track.duration as f64 / self.track.timescale as f64) * 1000.0
+        if self.video.timescale == 0 { return 0.0; }
+        (self.video.duration as f64 / self.video.timescale as f64) * 1000.0
     }
 
     pub fn codec_string(&self) -> String {
-        build_codec_string(&self.track.hvcc_raw, self.track.codec_fourcc)
+        build_codec_string(&self.video.hvcc_raw, self.video.codec_fourcc)
     }
 
-    pub fn codec_description(&self) -> Vec<u8> { self.track.hvcc_raw.clone() }
+    pub fn codec_description(&self) -> Vec<u8> { self.video.hvcc_raw.clone() }
 
     pub fn nal_length_size(&self) -> u8 {
-        if self.track.hvcc_raw.len() > 21 { (self.track.hvcc_raw[21] & 0x03) + 1 } else { 4 }
+        if self.video.hvcc_raw.len() > 21 { (self.video.hvcc_raw[21] & 0x03) + 1 } else { 4 }
     }
 
     pub fn read_sample(&self, index: u32) -> Option<Sample> {
         let i = index as usize;
-        if i >= self.track.sample_count() { return None; }
-        let offset = self.sample_offsets[i] as usize;
-        let size = self.track.sample_sizes[i] as usize;
+        if i >= self.video.sample_count() { return None; }
+        let offset = self.v_sample_offsets[i] as usize;
+        let size = self.video.sample_sizes[i] as usize;
         if offset + size > self.data.len() { return None; }
         let sample_data = self.data[offset..offset + size].to_vec();
-        let timescale = self.track.timescale as f64;
-        let dts = self.dts_values[i] as f64;
-        let cts_offset = if i < self.track.composition_offsets.len() {
-            self.track.composition_offsets[i] as f64
+        let timescale = self.video.timescale as f64;
+        let dts = self.v_dts_values[i] as f64;
+        let cts_offset = if i < self.video.composition_offsets.len() {
+            self.video.composition_offsets[i] as f64
         } else { 0.0 };
-        let pts = dts + cts_offset - self.pts_offset;
+        let pts = dts + cts_offset - self.v_pts_offset;
         let timestamp_us = (pts / timescale) * 1_000_000.0;
-        let duration = if i < self.track.sample_durations.len() {
-            self.track.sample_durations[i]
+        let duration = if i < self.video.sample_durations.len() {
+            self.video.sample_durations[i]
         } else {
-            self.track.sample_durations.last().copied().unwrap_or(1)
+            self.video.sample_durations.last().copied().unwrap_or(1)
         };
         let duration_us = (duration as f64 / timescale) * 1_000_000.0;
-        Some(Sample { is_sync: self.track.is_sync(i), timestamp_us, duration_us, data: sample_data })
+        Some(Sample { is_sync: self.video.is_sync(i), timestamp_us, duration_us, data: sample_data })
+    }
+
+    // ── Audio API ──
+
+    pub fn has_audio(&self) -> bool { self.audio.is_some() }
+
+    pub fn audio_sample_rate(&self) -> u32 {
+        self.audio.as_ref().map_or(0, |a| a.sample_rate)
+    }
+
+    pub fn audio_channel_count(&self) -> u16 {
+        self.audio.as_ref().map_or(0, |a| a.channel_count)
+    }
+
+    /// AudioSpecificConfig from esds — needed for WebCodecs AudioDecoder config
+    pub fn audio_codec_config(&self) -> Vec<u8> {
+        self.audio.as_ref().map_or_else(Vec::new, |a| a.codec_config.clone())
+    }
+
+    pub fn audio_sample_count(&self) -> u32 {
+        self.audio.as_ref().map_or(0, |a| a.sample_count() as u32)
+    }
+
+    pub fn read_audio_sample(&self, index: u32) -> Option<Sample> {
+        let a = self.audio.as_ref()?;
+        let i = index as usize;
+        if i >= a.sample_count() { return None; }
+        let offset = self.a_sample_offsets[i] as usize;
+        let size = a.sample_sizes[i] as usize;
+        if offset + size > self.data.len() { return None; }
+        let sample_data = self.data[offset..offset + size].to_vec();
+        let timescale = a.timescale as f64;
+        let dts = self.a_dts_values[i] as f64;
+        let timestamp_us = (dts / timescale) * 1_000_000.0;
+        let duration = if i < a.sample_durations.len() {
+            a.sample_durations[i]
+        } else {
+            a.sample_durations.last().copied().unwrap_or(1)
+        };
+        let duration_us = (duration as f64 / timescale) * 1_000_000.0;
+        Some(Sample { is_sync: true, timestamp_us, duration_us, data: sample_data })
     }
 }

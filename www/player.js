@@ -29,6 +29,14 @@ class HEVCPlayer {
         this.rafId = null;
         this.pendingDecodes = 0;
         this.flushed = false;
+        // Audio
+        this.audioCtx = null;
+        this.audioDecoder = null;
+        this.nextAudioSample = 0;
+        this.totalAudioSamples = 0;
+        this.audioBufferQueue = []; // { pts, audioBuffer }
+        this.audioScheduledUntil = 0;
+        this.audioStartOffset = 0;
     }
 
     async load(arrayBuffer) {
@@ -83,6 +91,11 @@ class HEVCPlayer {
         this.frameBuffer.reset();
         const hvcc2 = this.demuxer.codec_description();
         this.worker.postMessage({ type: 'reset', config: hvcc2 });
+
+        // Init audio if available
+        if (this.demuxer.has_audio() && typeof AudioDecoder !== 'undefined') {
+            await this.initAudio();
+        }
 
         status.textContent = status.textContent.replace(/ — .*/, '') + ' — Ready';
     }
@@ -197,12 +210,17 @@ class HEVCPlayer {
     play() {
         if (this.clock.is_playing()) return;
         this.clock.play(performance.now());
+        if (this.audioCtx) {
+            this.audioCtx.resume();
+            this.audioStartOffset = this.audioCtx.currentTime;
+        }
         this.feedWorker();
         this.renderLoop();
     }
 
     pause() {
         this.clock.pause(performance.now());
+        if (this.audioCtx) this.audioCtx.suspend();
         if (this.rafId) {
             cancelAnimationFrame(this.rafId);
             this.rafId = null;
@@ -216,6 +234,18 @@ class HEVCPlayer {
         this.nextSample = 0;
         this.pendingDecodes = 0;
         this.flushed = false;
+        this.nextAudioSample = 0;
+        this.audioBufferQueue = [];
+        this.audioScheduledUntil = 0;
+        if (this.audioDecoder && this.audioDecoder.state !== 'closed') {
+            this.audioDecoder.reset();
+            this.audioDecoder.configure({
+                codec: 'mp4a.40.2',
+                sampleRate: this.demuxer.audio_sample_rate(),
+                numberOfChannels: this.demuxer.audio_channel_count(),
+                description: this.demuxer.audio_codec_config(),
+            });
+        }
 
         const hvcc = this.demuxer.codec_description();
         this.worker.postMessage({ type: 'reset', config: hvcc });
@@ -228,9 +258,12 @@ class HEVCPlayer {
         if (!this.clock.is_playing()) return;
 
         this.feedWorker();
+        this.feedAudioDecoder();
 
         const now = performance.now();
         const elapsedUs = this.clock.elapsed_us(now);
+
+        this.scheduleAudio(elapsedUs);
 
         // Pop next displayable frame from Rust buffer
         if (this.frameBuffer.pop_frame(elapsedUs, this.flushed)) {
@@ -266,6 +299,106 @@ class HEVCPlayer {
 
     setSpeed(speed) {
         this.clock.set_speed(performance.now(), speed);
+        // Rebuild audio pipeline at new speed
+        if (this.audioCtx) {
+            this.audioScheduledUntil = 0;
+            this.audioBufferQueue = [];
+        }
+    }
+
+    // ── Audio ──
+
+    async initAudio() {
+        this.totalAudioSamples = this.demuxer.audio_sample_count();
+        if (this.totalAudioSamples === 0) return;
+
+        this.audioCtx = new AudioContext({
+            sampleRate: this.demuxer.audio_sample_rate(),
+        });
+        // Suspend until play
+        this.audioCtx.suspend();
+
+        const config = {
+            codec: 'mp4a.40.2', // AAC-LC
+            sampleRate: this.demuxer.audio_sample_rate(),
+            numberOfChannels: this.demuxer.audio_channel_count(),
+            description: this.demuxer.audio_codec_config(),
+        };
+
+        const support = await AudioDecoder.isConfigSupported(config);
+        if (!support.supported) {
+            console.warn('AudioDecoder AAC not supported');
+            this.audioCtx = null;
+            return;
+        }
+
+        this.audioDecoder = new AudioDecoder({
+            output: (audioData) => this.onAudioData(audioData),
+            error: (e) => console.error('AudioDecoder error:', e),
+        });
+        this.audioDecoder.configure(config);
+        this.nextAudioSample = 0;
+    }
+
+    onAudioData(audioData) {
+        // Convert AudioData to AudioBuffer for Web Audio scheduling
+        const numFrames = audioData.numberOfFrames;
+        const numChannels = audioData.numberOfChannels;
+        const sampleRate = audioData.sampleRate;
+        const buf = this.audioCtx.createBuffer(numChannels, numFrames, sampleRate);
+
+        for (let ch = 0; ch < numChannels; ch++) {
+            const dest = buf.getChannelData(ch);
+            audioData.copyTo(dest, { planeIndex: ch, format: 'f32-planar' });
+        }
+
+        const pts = audioData.timestamp; // microseconds
+        this.audioBufferQueue.push({ pts, buffer: buf });
+        audioData.close();
+    }
+
+    feedAudioDecoder() {
+        if (!this.audioDecoder) return;
+        // Feed up to 20 samples ahead
+        while (this.nextAudioSample < this.totalAudioSamples &&
+               this.audioDecoder.decodeQueueSize < 20) {
+            const sample = this.demuxer.read_audio_sample(this.nextAudioSample);
+            this.nextAudioSample++;
+            if (!sample) continue;
+            const chunk = new EncodedAudioChunk({
+                type: 'key', // AAC frames are always keyframes
+                timestamp: sample.timestamp_us,
+                duration: sample.duration_us,
+                data: sample.data,
+            });
+            this.audioDecoder.decode(chunk);
+        }
+    }
+
+    scheduleAudio(elapsedUs) {
+        if (!this.audioCtx || this.audioCtx.state !== 'running') return;
+
+        // Schedule decoded audio buffers ahead of current playback position
+        const scheduleAheadUs = 500000; // 500ms lookahead
+        const speed = this.clock.speed();
+
+        while (this.audioBufferQueue.length > 0) {
+            const { pts, buffer } = this.audioBufferQueue[0];
+            if (pts > elapsedUs + scheduleAheadUs) break;
+            this.audioBufferQueue.shift();
+
+            if (pts < elapsedUs - 100000) continue; // skip if too far behind
+
+            const source = this.audioCtx.createBufferSource();
+            source.buffer = buffer;
+            source.playbackRate.value = speed;
+            source.connect(this.audioCtx.destination);
+
+            // Schedule at the correct Web Audio time
+            const audioTime = this.audioStartOffset + (pts / 1_000_000) / speed;
+            const when = Math.max(audioTime, this.audioCtx.currentTime);
+            source.start(when);
+        }
     }
 
     destroy() {
@@ -274,6 +407,14 @@ class HEVCPlayer {
         if (this.worker) {
             this.worker.terminate();
             this.worker = null;
+        }
+        if (this.audioDecoder) {
+            this.audioDecoder.close();
+            this.audioDecoder = null;
+        }
+        if (this.audioCtx) {
+            this.audioCtx.close();
+            this.audioCtx = null;
         }
         this.renderer = null;
     }
