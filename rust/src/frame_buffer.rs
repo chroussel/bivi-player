@@ -166,6 +166,10 @@ impl FrameBuffer {
         self.frames.len()
     }
 
+    pub fn is_empty(&self) -> bool {
+        self.frames.is_empty()
+    }
+
     pub fn is_ready(&self) -> bool {
         self.frames.len() > self.min_reorder
     }

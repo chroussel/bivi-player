@@ -1,6 +1,7 @@
 use wasm_bindgen::prelude::*;
 
 #[wasm_bindgen]
+#[derive(Default)]
 pub struct PlaybackClock {
     start_time: f64,
     pause_offset: f64,

@@ -22,13 +22,13 @@ hevc:
 
 js:
 	cp js/src/*.js dist/
-	@# Worker needs to be in same directory as library
-	cp js/src/decode-worker.js dist/
+	@# Symlink dist into examples for dev server
+	ln -sfn ../dist examples/lib
 
 # ── Serve examples ──
 
 serve: all
-	python3 examples/server.py 8081
+	cd examples && python3 server.py 8081
 
 # ── Clean ──
 

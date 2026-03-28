@@ -4,9 +4,7 @@ import http.server
 import os
 import sys
 
-# Serve from project root (parent of examples/)
-ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-os.chdir(ROOT)
+# Serve from examples/ directory
 
 class Handler(http.server.SimpleHTTPRequestHandler):
     def end_headers(self):

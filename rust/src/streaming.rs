@@ -1,7 +1,6 @@
 //! Streaming demuxer — parses MP4 moov box without needing the full file.
 //! Media data (mdat) is fetched on demand via JS Range requests.
 
-use bytes::Buf;
 use wasm_bindgen::prelude::*;
 
 use crate::demuxer::{self, Sample};

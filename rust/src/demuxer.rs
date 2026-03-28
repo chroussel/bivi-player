@@ -70,7 +70,7 @@ struct StscEntry {
     samples_per_chunk: u32,
 }
 
-pub(crate) struct VideoTrack {
+pub struct VideoTrack {
     pub timescale: u32,
     pub duration: u64,
     pub width: u16,
@@ -145,7 +145,7 @@ impl VideoTrack {
     }
 }
 
-pub(crate) struct AudioTrack {
+pub struct AudioTrack {
     pub timescale: u32,
     pub duration: u64,
     pub sample_rate: u32,

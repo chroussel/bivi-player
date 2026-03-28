@@ -8,3 +8,4 @@
 /examples/data/*.mkv
 /rust/codecs/codec-wrapper/target
 /rust/codecs/codec-wrapper/Cargo.lock
+/examples/lib
