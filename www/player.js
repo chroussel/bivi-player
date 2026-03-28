@@ -684,8 +684,10 @@ seekbar.addEventListener('change', () => {
     player.seek(targetUs);
 });
 
+let arrowWasPlaying = false;
 const arrowSeek = accumulatedDebounce((targetUs) => {
     if (!player) return;
+    player._seekResumeOverride = arrowWasPlaying;
     player.seek(Math.max(0, Math.min(targetUs, player.durationMs * 1000)));
 }, 300);
 
@@ -698,6 +700,11 @@ document.addEventListener('keydown', (e) => {
     if ((e.code === 'ArrowRight' || e.code === 'ArrowLeft') && player) {
         e.preventDefault();
         const delta = e.code === 'ArrowRight' ? 10_000_000 : -10_000_000;
+        if (arrowSeek.pending() == null) {
+            // First press — pause and capture state
+            arrowWasPlaying = player.clock.is_playing();
+            if (arrowWasPlaying) player.pause();
+        }
         arrowSeek.add(delta, () =>
             player._seekTarget ?? player.clock.elapsed_us(performance.now())
         );
