@@ -28,7 +28,7 @@ js:
 # ── Serve examples ──
 
 serve: all
-	cd examples && python3 server.py 8081
+	python3 examples/server.py 8081
 
 # ── Clean ──
 
