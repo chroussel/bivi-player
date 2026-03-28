@@ -88,7 +88,18 @@ impl MediaSession {
     pub fn still_downloading(&self) -> bool { self.state.still_downloading() }
     pub fn should_feed(&self, buf_len: u32) -> bool { self.state.should_feed(buf_len) }
     pub fn should_flush(&self) -> bool { self.state.should_flush() }
-    pub fn needs_buffer(&self) -> bool { self.state.needs_buffer() }
+    /// Should the player fetch more data?
+    pub fn needs_buffer(&self) -> bool {
+        if !self.state.still_downloading() { return false; }
+        let next = self.state.next_video_sample();
+        let total = self.state.total_video_samples();
+        let buffered = total.saturating_sub(next);
+        // MKV: check frame count
+        if buffered < 240 { return true; }
+        // MP4: check if sample 10s ahead is cached
+        let look = (next + 240).min(total.saturating_sub(1));
+        !self.source.has_video_sample(look)
+    }
 
     // ── Delegate to MediaSource ──
 
