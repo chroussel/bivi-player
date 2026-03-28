@@ -387,9 +387,10 @@ export class HEVCPlayerCore {
 
         this.scheduleAudio(elapsedUs);
 
-        // Reload subtitles if more arrived (streaming MKV)
-        if (this.demuxer.stillDownloading && this.demuxer.subtitleCount() > this._lastSubCount) {
-            this._lastSubCount = this.demuxer.subtitleCount();
+        // Reload subtitles if more arrived (streaming)
+        const subCount = this.demuxer.subtitleCount();
+        if (subCount > this._lastSubCount) {
+            this._lastSubCount = subCount;
             this.loadSubtitles();
         }
         this.updateSubtitles(elapsedUs);
@@ -424,7 +425,7 @@ export class HEVCPlayerCore {
         this.updateTime(elapsedUs / 1000);
 
         const done = this.flushed && this.frameBuffer.len() === 0;
-        if (done) {
+        if (done && !this.demuxer.stillDownloading) {
             this.clock.pause(now);
             this._setStatus(this._getStatus().replace(/ — .*/, '') + ' — Finished');
         } else {
@@ -517,21 +518,28 @@ export class HEVCPlayerCore {
         }
     }
 
-    _seekDecodeCheck() {
+    async _seekDecodeCheck() {
         if (!this._seekDecoding) return;
+
+        // Update sample count (grows during streaming)
+        this.totalSamples = this.demuxer.sampleCount();
+
+        // If no samples available at seek position, buffer more
+        while (this.demuxer.stillDownloading && this.nextSample >= this.totalSamples) {
+            await this._bufferMore();
+            this.totalSamples = this.demuxer.sampleCount();
+        }
+
+        this.feedWorker();
+
+        // Wait for decoded frame
         if (this.frameBuffer.len() > 0) {
             this.frameBuffer.pop_frame(Infinity, true);
             this.renderer.render_current_frame(this.frameBuffer);
             this._seekDecoding = false;
             return;
         }
-        // Update sample count (might have grown from streaming)
-        this.totalSamples = this.demuxer.sampleCount();
-        // Need more data? Trigger buffer fetch
-        if (this.demuxer.stillDownloading && this.nextSample >= this.totalSamples) {
-            this._bufferMore();
-        }
-        this.feedWorker();
+
         requestAnimationFrame(() => this._seekDecodeCheck());
     }
 
