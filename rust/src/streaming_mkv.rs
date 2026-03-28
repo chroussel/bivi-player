@@ -1,8 +1,30 @@
 //! Streaming MKV demuxer — parses MKV progressively from a byte buffer.
 //! JS pushes data chunks, Rust parses headers + yields frames incrementally.
 
-use std::io::Cursor;
+use std::cell::Cell;
+use std::io::{Cursor, Read};
+use std::rc::Rc;
 use wasm_bindgen::prelude::*;
+
+struct CountingReader<R: Read> {
+    inner: R,
+    count: Rc<Cell<usize>>,
+}
+
+impl<R: Read> CountingReader<R> {
+    fn new(inner: R) -> (Self, Rc<Cell<usize>>) {
+        let count = Rc::new(Cell::new(0));
+        (CountingReader { inner, count: count.clone() }, count)
+    }
+}
+
+impl<R: Read> Read for CountingReader<R> {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        let n = self.inner.read(buf)?;
+        self.count.set(self.count.get() + n);
+        Ok(n)
+    }
+}
 
 use crate::demuxer::Sample;
 use crate::matroska::streaming::{self, MkvFrameIter, MkvHeader, TrackInfo};
@@ -148,10 +170,12 @@ impl StreamingMkvDemuxer {
             return;
         }
 
-        let mut cursor = Cursor::new(remaining);
-        let mut iter = MkvFrameIter::new(&mut cursor, self.timecode_scale);
+        let cursor = Cursor::new(remaining);
+        let (counting, byte_count) = CountingReader::new(cursor);
+        let mut iter = MkvFrameIter::new(counting, self.timecode_scale);
         iter.set_cluster_timestamp(self.cluster_timestamp);
 
+        let mut last_good_bytes = 0usize;
         while let Some(frame) = iter.next_frame() {
             let ts_us = frame.timestamp_ns as f64 / 1_000.0;
             let dur_us = frame.duration_ns.map(|d| d as f64 / 1_000.0).unwrap_or(0.0);
@@ -174,12 +198,11 @@ impl StreamingMkvDemuxer {
                 let text = String::from_utf8_lossy(&frame.data).to_string();
                 self.subtitle_events.push(SubtitleEvent::new(ts_us, dur_us, text));
             }
+            last_good_bytes = byte_count.get();
         }
 
-        // Save state for next call
-        let consumed = iter.bytes_consumed();
         self.cluster_timestamp = iter.cluster_timestamp();
-        self.bytes_consumed += consumed as usize;
+        self.bytes_consumed += last_good_bytes;
     }
 
     // ── Video ──
