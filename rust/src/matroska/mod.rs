@@ -56,6 +56,7 @@ mod block;
 mod ebml;
 pub mod element_id;
 mod enums;
+pub mod streaming;
 mod error;
 
 /// The doc type version this demuxer supports.
