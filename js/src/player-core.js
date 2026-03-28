@@ -123,15 +123,16 @@ export class HEVCPlayerCore {
         const total = parseInt(resp.headers.get('Content-Length') || '0');
         const reader = resp.body.getReader();
 
-        // Read chunks until header is parsed
+        // Read chunks until we have header + some video frames
         let headerReady = false;
-        while (!headerReady) {
+        while (true) {
             const { done, value } = await reader.read();
             if (done) break;
             headerReady = this.demuxer.push_data(value);
-            if (total) {
-                this._setStatus(`Buffering... ${(this.demuxer.sample_count())} frames`);
-            }
+            const frames = this.demuxer.sample_count();
+            this._setStatus(`Buffering... ${frames} frames`);
+            // Need header + at least 30 frames (~1s) to start
+            if (headerReady && frames >= 30) break;
         }
 
         if (!headerReady) throw new Error('Could not parse MKV header');
