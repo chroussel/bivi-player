@@ -1,66 +1,10 @@
-//! Streaming MKV demuxer — parses MKV progressively from a byte buffer.
-//! JS pushes data chunks, Rust parses headers + yields frames incrementally.
+//! Streaming MKV demuxer — wraps the state machine parser for WASM.
 
-use std::cell::Cell;
-use std::io::{Cursor, Read};
-use std::rc::Rc;
 use wasm_bindgen::prelude::*;
 
-struct CountingReader<R: Read> {
-    inner: R,
-    count: Rc<Cell<usize>>,
-}
-
-impl<R: Read> CountingReader<R> {
-    fn new(inner: R) -> (Self, Rc<Cell<usize>>) {
-        let count = Rc::new(Cell::new(0));
-        (CountingReader { inner, count: count.clone() }, count)
-    }
-}
-
-impl<R: Read> Read for CountingReader<R> {
-    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
-        let n = self.inner.read(buf)?;
-        self.count.set(self.count.get() + n);
-        Ok(n)
-    }
-}
-
 use crate::demuxer::Sample;
-use crate::matroska::streaming::{self, MkvFrameIter, MkvHeader, TrackInfo};
+use crate::matroska::streaming::StreamingMkvParser;
 use crate::mkv::SubtitleEvent;
-
-#[wasm_bindgen]
-pub struct StreamingMkvDemuxer {
-    // Buffer accumulates fetched data
-    buffer: Vec<u8>,
-    bytes_consumed: usize,
-
-    // Parsed header info
-    header: Option<MkvHeader>,
-    timecode_scale: u64,
-    video_track: u64,
-    audio_tracks: Vec<u64>,
-    subtitle_tracks: Vec<u64>,
-
-    // Extracted frames
-    video_frames: Vec<FrameData>,
-    audio_frames: Vec<FrameData>,
-    subtitle_events: Vec<SubtitleEvent>,
-
-    // Track metadata
-    width: u32,
-    height: u32,
-    codec_private: Vec<u8>,
-    audio_sample_rate: u32,
-    audio_channels: u16,
-    audio_codec_private: Vec<u8>,
-    duration_ms: f64,
-
-    // Parser state preserved between push_data calls
-    header_parsed: bool,
-    cluster_timestamp: u64,
-}
 
 struct FrameData {
     timestamp_us: f64,
@@ -70,15 +14,35 @@ struct FrameData {
 }
 
 #[wasm_bindgen]
+pub struct StreamingMkvDemuxer {
+    parser: StreamingMkvParser,
+
+    video_track: u64,
+    audio_tracks: Vec<u64>,
+    subtitle_tracks: Vec<u64>,
+
+    video_frames: Vec<FrameData>,
+    audio_frames: Vec<FrameData>,
+    subtitle_events: Vec<SubtitleEvent>,
+
+    width: u32,
+    height: u32,
+    codec_private: Vec<u8>,
+    audio_sample_rate: u32,
+    audio_channels: u16,
+    audio_codec_private: Vec<u8>,
+    duration_ms: f64,
+
+    header_parsed: bool,
+}
+
+#[wasm_bindgen]
 impl StreamingMkvDemuxer {
     #[wasm_bindgen(constructor)]
     pub fn new() -> StreamingMkvDemuxer {
         console_error_panic_hook::set_once();
         StreamingMkvDemuxer {
-            buffer: Vec::new(),
-            bytes_consumed: 0,
-            header: None,
-            timecode_scale: 1_000_000,
+            parser: StreamingMkvParser::new(),
             video_track: 0,
             audio_tracks: Vec::new(),
             subtitle_tracks: Vec::new(),
@@ -93,116 +57,78 @@ impl StreamingMkvDemuxer {
             audio_codec_private: Vec::new(),
             duration_ms: 0.0,
             header_parsed: false,
-            cluster_timestamp: 0,
         }
     }
 
-    /// Push a chunk of data from the fetch ReadableStream.
-    /// Returns true if header is parsed and playback can begin.
+    /// Push a chunk of data. Returns true once header is parsed.
     pub fn push_data(&mut self, data: &[u8]) -> bool {
-        self.buffer.extend_from_slice(data);
+        self.parser.push(data);
+        self.parser.parse();
 
-        if !self.header_parsed {
-            self.try_parse_header();
+        // Extract header info on first availability
+        if !self.header_parsed && self.parser.header_done {
+            self.extract_header();
+            self.header_parsed = true;
         }
 
-        if self.header_parsed {
-            self.parse_more_frames();
-        }
+        // Collect any new frames
+        self.collect_frames();
 
         self.header_parsed
     }
 
-    /// Signal that all data has been received.
     pub fn finish(&mut self) {
-        if self.header_parsed {
-            self.parse_more_frames();
-        }
+        self.parser.parse();
+        self.collect_frames();
     }
 
-    fn try_parse_header(&mut self) {
-        // Try to parse header from accumulated data
-        let mut cursor = Cursor::new(&self.buffer[..]);
-        if let Some(header) = streaming::parse_mkv_header(&mut cursor) {
-            let consumed = cursor.position() as usize;
+    fn extract_header(&mut self) {
+        self.duration_ms = self.parser.duration * self.parser.timecode_scale as f64 / 1_000_000.0;
 
-            self.timecode_scale = header.timecode_scale;
-            self.duration_ms = header.duration * header.timecode_scale as f64 / 1_000_000.0;
-
-            // Find tracks
-            for t in &header.tracks {
-                match t.track_type {
-                    1 => {
-                        // Video
-                        if self.video_track == 0 {
-                            self.video_track = t.number;
-                            self.width = t.pixel_width;
-                            self.height = t.pixel_height;
-                            self.codec_private = t.codec_private.clone();
-                        }
-                    }
-                    2 => {
-                        // Audio
-                        if self.audio_tracks.is_empty() {
-                            self.audio_sample_rate = t.sample_rate as u32;
-                            self.audio_channels = t.channels as u16;
-                            self.audio_codec_private = t.codec_private.clone();
-                        }
-                        self.audio_tracks.push(t.number);
-                    }
-                    17 => {
-                        // Subtitle
-                        self.subtitle_tracks.push(t.number);
-                    }
-                    _ => {}
+        for t in &self.parser.tracks {
+            match t.track_type {
+                1 if self.video_track == 0 => {
+                    self.video_track = t.number;
+                    self.width = t.pixel_width;
+                    self.height = t.pixel_height;
+                    self.codec_private = t.codec_private.clone();
                 }
+                2 => {
+                    if self.audio_tracks.is_empty() {
+                        self.audio_sample_rate = t.sample_rate as u32;
+                        self.audio_channels = t.channels as u16;
+                        self.audio_codec_private = t.codec_private.clone();
+                    }
+                    self.audio_tracks.push(t.number);
+                }
+                17 => {
+                    self.subtitle_tracks.push(t.number);
+                }
+                _ => {}
             }
-
-            self.header = Some(header);
-            self.bytes_consumed = consumed;
-            self.header_parsed = true;
         }
     }
 
-    fn parse_more_frames(&mut self) {
-        let remaining = &self.buffer[self.bytes_consumed..];
-        if remaining.is_empty() {
-            return;
-        }
-
-        let cursor = Cursor::new(remaining);
-        let (counting, byte_count) = CountingReader::new(cursor);
-        let mut iter = MkvFrameIter::new(counting, self.timecode_scale);
-        iter.set_cluster_timestamp(self.cluster_timestamp);
-
-        let mut last_good_bytes = 0usize;
-        while let Some(frame) = iter.next_frame() {
+    fn collect_frames(&mut self) {
+        for frame in self.parser.drain_frames() {
             let ts_us = frame.timestamp_ns as f64 / 1_000.0;
             let dur_us = frame.duration_ns.map(|d| d as f64 / 1_000.0).unwrap_or(0.0);
 
             if frame.track == self.video_track {
                 self.video_frames.push(FrameData {
-                    timestamp_us: ts_us,
-                    duration_us: dur_us,
-                    data: frame.data,
-                    is_keyframe: frame.is_keyframe,
+                    timestamp_us: ts_us, duration_us: dur_us,
+                    data: frame.data, is_keyframe: frame.is_keyframe,
                 });
             } else if self.audio_tracks.contains(&frame.track) {
                 self.audio_frames.push(FrameData {
-                    timestamp_us: ts_us,
-                    duration_us: dur_us,
-                    data: frame.data,
-                    is_keyframe: true,
+                    timestamp_us: ts_us, duration_us: dur_us,
+                    data: frame.data, is_keyframe: true,
                 });
             } else if self.subtitle_tracks.contains(&frame.track) {
                 let text = String::from_utf8_lossy(&frame.data).to_string();
                 self.subtitle_events.push(SubtitleEvent::new(ts_us, dur_us, text));
             }
-            last_good_bytes = byte_count.get();
         }
-
-        self.cluster_timestamp = iter.cluster_timestamp();
-        self.bytes_consumed += last_good_bytes;
     }
 
     // ── Video ──
@@ -215,11 +141,7 @@ impl StreamingMkvDemuxer {
     pub fn codec_description(&self) -> Vec<u8> { self.codec_private.clone() }
 
     pub fn nal_length_size(&self) -> u8 {
-        if self.codec_private.len() > 21 {
-            (self.codec_private[21] & 0x03) + 1
-        } else {
-            4
-        }
+        if self.codec_private.len() > 21 { (self.codec_private[21] & 0x03) + 1 } else { 4 }
     }
 
     pub fn read_sample(&self, index: u32) -> Option<Sample> {
