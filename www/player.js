@@ -35,8 +35,8 @@ class HEVCPlayer {
         this.nextAudioSample = 0;
         this.totalAudioSamples = 0;
         this.audioBufferQueue = []; // { pts, audioBuffer }
-        this.audioScheduledUntil = 0;
-        this.audioStartOffset = 0;
+        this.audioAnchorTime = 0;    // audioCtx.currentTime at anchor
+        this.audioAnchorElapsed = 0; // video elapsed_us at anchor
         // Subtitles
         this.subtitles = [];
         this.subtitleEl = document.getElementById('subtitles');
@@ -224,7 +224,8 @@ class HEVCPlayer {
         this.clock.play(performance.now());
         if (this.audioCtx) {
             this.audioCtx.resume();
-            this.audioStartOffset = this.audioCtx.currentTime;
+            this.audioAnchorTime = this.audioCtx.currentTime;
+            this.audioAnchorElapsed = this.clock.elapsed_us(performance.now());
         }
         this.feedWorker();
         this.renderLoop();
@@ -248,7 +249,8 @@ class HEVCPlayer {
         this.flushed = false;
         this.nextAudioSample = 0;
         this.audioBufferQueue = [];
-        this.audioScheduledUntil = 0;
+        this.audioAnchorTime = 0;
+        this.audioAnchorElapsed = 0;
         if (this.audioDecoder && this.audioDecoder.state !== 'closed') {
             this.audioDecoder.reset();
             this.audioDecoder.configure({
@@ -311,12 +313,12 @@ class HEVCPlayer {
     }
 
     setSpeed(speed) {
-        this.clock.set_speed(performance.now(), speed);
-        // Rebuild audio pipeline at new speed
-        if (this.audioCtx) {
-            this.audioScheduledUntil = 0;
-            this.audioBufferQueue = [];
+        // Re-anchor audio before speed change
+        if (this.audioCtx && this.audioCtx.state === 'running') {
+            this.audioAnchorTime = this.audioCtx.currentTime;
+            this.audioAnchorElapsed = this.clock.elapsed_us(performance.now());
         }
+        this.clock.set_speed(performance.now(), speed);
     }
 
     // ── Subtitles ──
@@ -437,8 +439,7 @@ class HEVCPlayer {
     scheduleAudio(elapsedUs) {
         if (!this.audioCtx || this.audioCtx.state !== 'running') return;
 
-        // Schedule decoded audio buffers ahead of current playback position
-        const scheduleAheadUs = 500000; // 500ms lookahead
+        const scheduleAheadUs = 500000;
         const speed = this.clock.speed();
 
         while (this.audioBufferQueue.length > 0) {
@@ -453,10 +454,13 @@ class HEVCPlayer {
             source.playbackRate.value = speed;
             source.connect(this.audioCtx.destination);
 
-            // Schedule at the correct Web Audio time
-            const audioTime = this.audioStartOffset + (pts / 1_000_000) / speed;
-            const when = Math.max(audioTime, this.audioCtx.currentTime);
-            source.start(when);
+            // Map video PTS to audioCtx.currentTime:
+            // At anchor: audioAnchorTime <-> audioAnchorElapsed
+            // PTS `pts` is (pts - anchorElapsed) video-microseconds from anchor
+            // In real time that's (pts - anchorElapsed) / speed / 1_000_000 seconds
+            const when = this.audioAnchorTime +
+                (pts - this.audioAnchorElapsed) / speed / 1_000_000;
+            source.start(Math.max(when, this.audioCtx.currentTime));
         }
     }
 
