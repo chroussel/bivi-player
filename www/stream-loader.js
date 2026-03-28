@@ -129,9 +129,11 @@ export class StreamLoader {
         const CHUNK_SIZE = 1024 * 1024; // 1MB
 
         // Find the file offset of the first uncached video sample
-        const startOff = demuxer.video_sample_offset(fromVideoSample);
+        let startOff = demuxer.video_sample_offset(fromVideoSample);
         if (startOff <= 0) return;
 
+        // Expand start backward slightly to catch interleaved audio before the video sample
+        startOff = Math.max(0, startOff - 64 * 1024); // 64KB before
         const endOff = Math.min(startOff + CHUNK_SIZE, this.fileSize);
 
         const data = await this.fetchRange(startOff, endOff);
@@ -150,9 +152,16 @@ export class StreamLoader {
         }
 
         // Distribute to audio samples that fall within this range
+        // Use binary-ish search: find audio sample near our time, scan around it
         if (demuxer.has_audio()) {
             const aCount = demuxer.audio_sample_count();
-            for (let i = 0; i < aCount; i++) {
+            // Find first audio sample near the current video sample's timestamp
+            const vSample = demuxer.read_sample(fromVideoSample);
+            const pts = vSample ? vSample.timestamp_us : 0;
+            let aStart = demuxer.find_audio_sample_at(pts);
+            // Scan backward to catch any before startOff
+            aStart = Math.max(0, aStart - 50);
+            for (let i = aStart; i < aCount; i++) {
                 const off = demuxer.audio_sample_offset(i);
                 if (off >= endOff) break;
                 if (off < startOff) continue;
