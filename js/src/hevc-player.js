@@ -116,6 +116,10 @@ export class HevcPlayerElement extends HTMLElement {
     }
 
     async streamUrl(url) {
+        // MKV doesn't support Range-based streaming — fall back to full fetch
+        if (url.match(/\.mkv(\?|$)/i)) {
+            return this.loadUrl(url);
+        }
         await this._ensureCore();
         try {
             await this._core.loadStream(url);
