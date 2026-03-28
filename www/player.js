@@ -698,12 +698,12 @@ document.addEventListener('keydown', (e) => {
     }
     if (e.code === 'ArrowRight' && player) {
         e.preventDefault();
-        const cur = player.clock.elapsed_us(performance.now());
-        player.seek(cur + 10_000_000); // +10s
+        const cur = player._seekTarget ?? player.clock.elapsed_us(performance.now());
+        player.seek(Math.min(cur + 10_000_000, player.durationMs * 1000));
     }
     if (e.code === 'ArrowLeft' && player) {
         e.preventDefault();
-        const cur = player.clock.elapsed_us(performance.now());
-        player.seek(Math.max(0, cur - 10_000_000)); // -10s
+        const cur = player._seekTarget ?? player.clock.elapsed_us(performance.now());
+        player.seek(Math.max(0, cur - 10_000_000));
     }
 });
