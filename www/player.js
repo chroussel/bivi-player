@@ -1,5 +1,4 @@
-import wasmInit, { Demuxer } from './pkg/videoplayer.js';
-import { WebGLRenderer } from './webgl-renderer.js';
+import wasmInit, { Demuxer, FrameBuffer, PlaybackClock, Renderer } from './pkg/videoplayer.js';
 
 const dropZone = document.getElementById('drop-zone');
 const fileInput = document.getElementById('file-input');
@@ -18,43 +17,38 @@ let player = null;
 class HEVCPlayer {
     constructor(canvas) {
         this.canvas = canvas;
-        this.renderer = new WebGLRenderer(canvas);
+        this.renderer = null; // initialized after wasmInit
         this.demuxer = null;
         this.worker = null;
-        this.decodedFrames = []; // { pts, imageData }
-        this.playing = false;
-        this.startTime = 0;
-        this.pauseOffset = 0;
+        this.frameBuffer = new FrameBuffer(50, 3); // max 50 frames, min 3 reorder
+        this.clock = new PlaybackClock();
         this.nextSample = 0;
         this.totalSamples = 0;
         this.durationMs = 0;
         this.nalLengthSize = 4;
         this.rafId = null;
-        this.width = 0;
-        this.height = 0;
-        this.playbackSpeed = 1.0;
         this.pendingDecodes = 0;
         this.flushed = false;
-        this.maxBuffer = 30;
+        this.sharedMemory = null;
     }
 
     async load(arrayBuffer) {
         status.textContent = 'Initializing...';
         await wasmInit();
 
+        this.renderer = new Renderer(this.canvas);
+
         status.textContent = 'Parsing MP4...';
         const data = new Uint8Array(arrayBuffer);
         this.demuxer = new Demuxer(data);
 
-        this.width = this.demuxer.width();
-        this.height = this.demuxer.height();
-        this.canvas.width = this.width;
-        this.canvas.height = this.height;
+        this.canvas.width = this.demuxer.width();
+        this.canvas.height = this.demuxer.height();
         this.totalSamples = this.demuxer.sample_count();
         this.durationMs = this.demuxer.duration_ms();
         this.nalLengthSize = this.demuxer.nal_length_size();
 
-        status.textContent = `Video: ${this.width}x${this.height}, ${this.totalSamples} frames, ${(this.durationMs / 1000).toFixed(1)}s`;
+        status.textContent = `Video: ${this.demuxer.width()}x${this.demuxer.height()}, ${this.totalSamples} frames, ${(this.durationMs / 1000).toFixed(1)}s`;
 
         // Start decoder worker
         status.textContent += ' — Loading decoder...';
@@ -68,10 +62,7 @@ class HEVCPlayer {
                     if (e.data.sharedMemory) this.sharedMemory = e.data.sharedMemory;
                     resolve();
                 }
-                if (e.data.type === 'error') {
-                    console.error('[decoder]', e.data.msg);
-                    // Don't reject on error, still wait for ready
-                }
+                if (e.data.type === 'error') console.error('[decoder]', e.data.msg);
                 if (e.data.type === 'log') console.log('[decoder]', e.data.msg);
             };
             this.worker.onerror = (e) => { clearTimeout(timeout); reject(e); };
@@ -86,10 +77,10 @@ class HEVCPlayer {
         status.textContent = status.textContent.replace(/ — .*/, '') + ' — Decoding thumbnail...';
         await this.decodeFirstFrame();
 
-        // Reset decoder after thumbnail so playback starts clean from sample 0
+        // Reset decoder after thumbnail so playback starts clean
         this.nextSample = 0;
         this.pendingDecodes = 0;
-        this.decodedFrames = [];
+        this.frameBuffer.reset();
         const hvcc2 = this.demuxer.codec_description();
         this.worker.postMessage({ type: 'reset', hvcc: hvcc2 });
 
@@ -126,7 +117,7 @@ class HEVCPlayer {
             this.worker.onmessage = (e) => {
                 const msg = e.data;
                 if (msg.type === 'frame') {
-                    this.renderer.render(msg.yData, msg.uData, msg.vData, msg.width, msg.height, 8);
+                    this.renderer.render(msg.yData, msg.uData, msg.vData, msg.width, msg.height);
                     clearTimeout(timeout);
                     this.worker.onmessage = prevHandler;
                     resolve();
@@ -147,29 +138,14 @@ class HEVCPlayer {
 
     onWorkerMessage(msg) {
         switch (msg.type) {
-            case 'frame': {
-                // Drop if buffer is full (back-pressure didn't catch it)
-                if (this.decodedFrames.length >= 50) break;
-
-                const frame = {
-                    pts: msg.pts,
-                    yData: msg.yData, uData: msg.uData, vData: msg.vData,
-                    width: msg.width, height: msg.height,
-                };
-                // Binary insert sorted by PTS (decoder doesn't fully reorder)
-                let lo = 0, hi = this.decodedFrames.length;
-                while (lo < hi) {
-                    const mid = (lo + hi) >> 1;
-                    if (this.decodedFrames[mid].pts < frame.pts) lo = mid + 1;
-                    else hi = mid;
-                }
-                this.decodedFrames.splice(lo, 0, frame);
+            case 'frame':
+                // Push into Rust frame buffer (handles PTS sorting + 10-bit conversion)
+                this.frameBuffer.push(msg.pts, msg.yData, msg.uData, msg.vData, msg.width, msg.height);
                 break;
-            }
             case 'decoded':
                 this.pendingDecodes -= msg.count;
                 if (msg.avgMs) console.log(`[perf] ${msg.count} samples, ${msg.frames} frames, avg ${msg.avgMs}ms/sample`);
-                if (this.playing) this.feedWorker();
+                if (this.clock.is_playing()) this.feedWorker();
                 break;
             case 'flushed':
                 this.flushed = true;
@@ -185,10 +161,8 @@ class HEVCPlayer {
     }
 
     feedWorker() {
-        // Send batches of samples to the worker to keep it busy
-        // but not overwhelm it
         if (this.pendingDecodes > 10) return;
-        if (this.decodedFrames.length > 30) return; // back-pressure: don't decode too far ahead
+        if (this.frameBuffer.len() > 30) return;
         if (this.nextSample >= this.totalSamples) {
             if (!this.flushed && this.pendingDecodes === 0) {
                 this.worker.postMessage({ type: 'flush' });
@@ -218,16 +192,14 @@ class HEVCPlayer {
     }
 
     play() {
-        if (this.playing) return;
-        this.playing = true;
-        this.startTime = performance.now() - this.pauseOffset;
+        if (this.clock.is_playing()) return;
+        this.clock.play(performance.now());
         this.feedWorker();
         this.renderLoop();
     }
 
     pause() {
-        this.playing = false;
-        this.pauseOffset = performance.now() - this.startTime;
+        this.clock.pause(performance.now());
         if (this.rafId) {
             cancelAnimationFrame(this.rafId);
             this.rafId = null;
@@ -236,50 +208,32 @@ class HEVCPlayer {
 
     restart() {
         this.pause();
-        this.decodedFrames = [];
+        this.frameBuffer.reset();
+        this.clock.reset();
         this.nextSample = 0;
-        this.pauseOffset = 0;
         this.pendingDecodes = 0;
         this.flushed = false;
-        this._lastShownPts = 0;
 
         const hvcc = this.demuxer.codec_description();
         this.worker.postMessage({ type: 'reset', hvcc });
 
-        const gl = this.renderer?.gl;
-        if (gl) { gl.clearColor(0,0,0,1); gl.clear(gl.COLOR_BUFFER_BIT); }
+        this.renderer?.clear();
         this.updateTime(0);
     }
 
     renderLoop() {
-        if (!this.playing) return;
+        if (!this.clock.is_playing()) return;
 
         this.feedWorker();
 
-        const elapsedUs = (performance.now() - this.startTime) * 1000 * this.playbackSpeed;
-        const MIN_REORDER = 3;
+        const now = performance.now();
+        const elapsedUs = this.clock.elapsed_us(now);
 
-        // Consume frames up to current time, keeping reorder margin
-        let frameToShow = null;
-        let skipped = 0;
-        while (this.decodedFrames.length > MIN_REORDER || this.flushed) {
-            const f = this.decodedFrames[0];
-            if (!f || f.pts > elapsedUs) break;
-            const candidate = this.decodedFrames.shift();
-            // Never go backward
-            if (candidate.pts >= (this._lastShownPts || 0)) {
-                if (frameToShow) skipped++;
-                frameToShow = candidate;
-                this._lastShownPts = candidate.pts;
-            } else {
-                skipped++;
-            }
-        }
+        // Pop next displayable frame from Rust buffer
+        if (this.frameBuffer.pop_frame(elapsedUs, this.flushed)) {
+            this.renderer.render_current_frame(this.frameBuffer);
 
-        if (frameToShow) {
-            this.renderFrame(frameToShow);
             // FPS tracking
-            const now = performance.now();
             this._fpsFrames = (this._fpsFrames || 0) + 1;
             if (!this._fpsTime) this._fpsTime = now;
             if (now - this._fpsTime >= 1000) {
@@ -291,10 +245,10 @@ class HEVCPlayer {
 
         this.updateTime(elapsedUs / 1000);
 
-        const done = this.flushed && this.decodedFrames.length === 0;
+        const done = this.flushed && this.frameBuffer.len() === 0;
 
         if (done) {
-            this.playing = false;
+            this.clock.pause(now);
             status.textContent = status.textContent.replace(/ — .*/, '') + ' — Finished';
         } else {
             this.rafId = requestAnimationFrame(() => this.renderLoop());
@@ -308,34 +262,17 @@ class HEVCPlayer {
     }
 
     setSpeed(speed) {
-        if (this.playing) {
-            // Re-anchor so position doesn't jump
-            const now = performance.now();
-            const elapsedUs = (now - this.startTime) * 1000 * this.playbackSpeed;
-            this.playbackSpeed = speed;
-            this.startTime = now - elapsedUs / (speed * 1000);
-        } else {
-            const elapsedUs = this.pauseOffset * 1000 * this.playbackSpeed;
-            this.playbackSpeed = speed;
-            this.pauseOffset = elapsedUs / (speed * 1000);
-        }
-    }
-
-    renderFrame(f) {
-        this.renderer.render(f.yData, f.uData, f.vData, f.width, f.height, f.bpp);
+        this.clock.set_speed(performance.now(), speed);
     }
 
     destroy() {
         this.pause();
-        this.decodedFrames = [];
+        this.frameBuffer.reset();
         if (this.worker) {
             this.worker.terminate();
             this.worker = null;
         }
-        if (this.renderer) {
-            this.renderer.destroy();
-            this.renderer = null;
-        }
+        this.renderer = null;
     }
 }
 
@@ -365,7 +302,6 @@ async function loadFile(file) {
     }
 }
 
-// Load sample file
 async function loadUrl(url) {
     if (player) player.destroy();
 
@@ -393,12 +329,10 @@ document.getElementById('load-sample')?.addEventListener('click', () => {
     loadUrl('./data/hellmode12_2m.mp4');
 });
 
-// File input (label[for] handles the click natively)
 fileInput.addEventListener('change', (e) => {
     if (e.target.files[0]) loadFile(e.target.files[0]);
 });
 
-// Drag and drop on the whole document (label elements don't handle drop well)
 document.addEventListener('dragover', (e) => {
     e.preventDefault();
     if (dropZone) dropZone.classList.add('drag-over');
@@ -415,21 +349,18 @@ document.addEventListener('drop', (e) => {
     if (file) loadFile(file);
 });
 
-// Controls
 playBtn.addEventListener('click', () => player?.play());
 pauseBtn.addEventListener('click', () => player?.pause());
 restartBtn.addEventListener('click', () => player?.restart());
 
-// Speed control
 speedSelect.addEventListener('change', () => {
     player?.setSpeed(parseFloat(speedSelect.value));
 });
 
-// Keyboard
 document.addEventListener('keydown', (e) => {
     if (e.code === 'Space') {
         e.preventDefault();
-        if (player?.playing) player.pause();
+        if (player?.clock?.is_playing()) player.pause();
         else player?.play();
     }
 });
