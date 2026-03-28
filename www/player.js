@@ -17,11 +17,11 @@ let player = null;
 class HEVCPlayer {
     constructor(canvas) {
         this.canvas = canvas;
-        this.renderer = null; // initialized after wasmInit
+        this.renderer = null;
         this.demuxer = null;
         this.worker = null;
-        this.frameBuffer = new FrameBuffer(50, 3); // max 50 frames, min 3 reorder
-        this.clock = new PlaybackClock();
+        this.frameBuffer = null;
+        this.clock = null;
         this.nextSample = 0;
         this.totalSamples = 0;
         this.durationMs = 0;
@@ -37,6 +37,8 @@ class HEVCPlayer {
         await wasmInit();
 
         this.renderer = new Renderer(this.canvas);
+        this.frameBuffer = new FrameBuffer(50, 3);
+        this.clock = new PlaybackClock();
 
         status.textContent = 'Parsing MP4...';
         const data = new Uint8Array(arrayBuffer);
@@ -67,7 +69,7 @@ class HEVCPlayer {
             };
             this.worker.onerror = (e) => { clearTimeout(timeout); reject(e); };
             const hvcc = this.demuxer.codec_description();
-            this.worker.postMessage({ type: 'init', hvcc });
+            this.worker.postMessage({ type: 'init', codec: 'hevc', config: hvcc });
         });
 
         // Set up frame handler
@@ -82,7 +84,7 @@ class HEVCPlayer {
         this.pendingDecodes = 0;
         this.frameBuffer.reset();
         const hvcc2 = this.demuxer.codec_description();
-        this.worker.postMessage({ type: 'reset', hvcc: hvcc2 });
+        this.worker.postMessage({ type: 'reset', config: hvcc2 });
 
         status.textContent = status.textContent.replace(/ — .*/, '') + ' — Ready';
     }
@@ -117,7 +119,16 @@ class HEVCPlayer {
             this.worker.onmessage = (e) => {
                 const msg = e.data;
                 if (msg.type === 'frame') {
-                    this.renderer.render(msg.yData, msg.uData, msg.vData, msg.width, msg.height);
+                    const mem = new Uint8Array(this.sharedMemory);
+                    this.frameBuffer.push_raw(
+                        msg.pts, mem,
+                        msg.plane0Ptr, msg.plane0Stride,
+                        msg.plane1Ptr, msg.plane1Stride,
+                        msg.plane2Ptr, msg.plane2Stride,
+                        msg.w, msg.h, 8,
+                    );
+                    this.frameBuffer.pop_frame(Infinity, true);
+                    this.renderer.render_current_frame(this.frameBuffer);
                     clearTimeout(timeout);
                     this.worker.onmessage = prevHandler;
                     resolve();
@@ -138,10 +149,19 @@ class HEVCPlayer {
 
     onWorkerMessage(msg) {
         switch (msg.type) {
-            case 'frame':
-                // Push into Rust frame buffer (handles PTS sorting + 10-bit conversion)
-                this.frameBuffer.push(msg.pts, msg.yData, msg.uData, msg.vData, msg.width, msg.height);
+            case 'frame': {
+                // C wrapper outputs 8-bit, stride=width into stable buffers
+                // Rust reads directly from shared memory — no JS copy
+                const mem = new Uint8Array(this.sharedMemory);
+                this.frameBuffer.push_raw(
+                    msg.pts, mem,
+                    msg.plane0Ptr, msg.plane0Stride,
+                    msg.plane1Ptr, msg.plane1Stride,
+                    msg.plane2Ptr, msg.plane2Stride,
+                    msg.w, msg.h, 8,
+                );
                 break;
+            }
             case 'decoded':
                 this.pendingDecodes -= msg.count;
                 if (msg.avgMs) console.log(`[perf] ${msg.count} samples, ${msg.frames} frames, avg ${msg.avgMs}ms/sample`);
@@ -215,7 +235,7 @@ class HEVCPlayer {
         this.flushed = false;
 
         const hvcc = this.demuxer.codec_description();
-        this.worker.postMessage({ type: 'reset', hvcc });
+        this.worker.postMessage({ type: 'reset', config: hvcc });
 
         this.renderer?.clear();
         this.updateTime(0);

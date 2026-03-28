@@ -97,109 +97,103 @@ int decoder_decode(void) {
     return more;
 }
 
-// Get the next decoded picture. Returns 0 if no picture available.
-// Writes plane pointers and strides to output params.
-static const struct de265_image* current_img = NULL;
+// ── Frame info struct (written by decoder, read by JS) ──
 
+typedef struct {
+    int32_t w;
+    int32_t h;
+    int32_t bpp;
+    int64_t pts;
+    uint32_t y_ptr;
+    int32_t y_stride;
+    uint32_t u_ptr;
+    int32_t u_stride;
+    uint32_t v_ptr;
+    int32_t v_stride;
+} frame_info;
+
+#define MAX_PENDING_FRAMES 16
+static frame_info pending_frames[MAX_PENDING_FRAMES];
+static int num_pending_frames = 0;
+
+// Collect all available decoded pictures into pending_frames array.
+// Returns number of frames collected.
 EMSCRIPTEN_KEEPALIVE
-int decoder_get_next_picture(void) {
+int decoder_collect_frames(void) {
     if (!ctx) return 0;
-    current_img = de265_get_next_picture(ctx);
-    return current_img ? 1 : 0;
+    num_pending_frames = 0;
+    const struct de265_image* img;
+    while (num_pending_frames < MAX_PENDING_FRAMES && (img = de265_get_next_picture(ctx)) != NULL) {
+        frame_info* f = &pending_frames[num_pending_frames];
+        f->w = de265_get_image_width(img, 0);
+        f->h = de265_get_image_height(img, 0);
+        f->bpp = de265_get_bits_per_pixel(img, 0);
+        f->pts = de265_get_image_PTS(img);
+
+        int stride;
+        f->y_ptr = (uint32_t)(uintptr_t)de265_get_image_plane(img, 0, &stride);
+        f->y_stride = stride;
+        f->u_ptr = (uint32_t)(uintptr_t)de265_get_image_plane(img, 1, &stride);
+        f->u_stride = stride;
+        f->v_ptr = (uint32_t)(uintptr_t)de265_get_image_plane(img, 2, &stride);
+        f->v_stride = stride;
+
+        num_pending_frames++;
+    }
+    return num_pending_frames;
 }
 
+// Get pointer to the pending_frames array (for JS to read via HEAP views)
 EMSCRIPTEN_KEEPALIVE
-int decoder_get_width(void) {
-    return current_img ? de265_get_image_width(current_img, 0) : 0;
+frame_info* decoder_get_frame_info(void) {
+    return pending_frames;
 }
 
+// Size of frame_info struct (for JS to step through the array)
 EMSCRIPTEN_KEEPALIVE
-int decoder_get_height(void) {
-    return current_img ? de265_get_image_height(current_img, 0) : 0;
+int decoder_frame_info_size(void) {
+    return sizeof(frame_info);
 }
 
-EMSCRIPTEN_KEEPALIVE
-int decoder_get_bits_per_pixel(void) {
-    return current_img ? de265_get_bits_per_pixel(current_img, 0) : 8;
-}
+// ── Push parameter sets from hvcC data ──
 
 EMSCRIPTEN_KEEPALIVE
-int64_t decoder_get_picture_pts(void) {
-    return current_img ? de265_get_image_PTS(current_img) : 0;
-}
+int decoder_push_parameter_sets(const uint8_t* hvcc, int hvcc_len) {
+    if (!ctx || hvcc_len < 23) return -1;
 
-EMSCRIPTEN_KEEPALIVE
-int decoder_get_chroma_format(void) {
-    return current_img ? (int)de265_get_chroma_format(current_img) : 1;
-}
+    int pos = 22;
+    int num_arrays = hvcc[pos++];
+    int nal_count = 0;
 
-// Get Y/U/V plane data pointer and stride for current picture
-EMSCRIPTEN_KEEPALIVE
-const uint8_t* decoder_get_plane(int channel, int* out_stride) {
-    if (!current_img) return NULL;
-    return de265_get_image_plane(current_img, channel, out_stride);
-}
+    for (int a = 0; a < num_arrays && pos + 3 <= hvcc_len; a++) {
+        pos++; // array_completeness | reserved | nal_unit_type
+        int num_nalus = (hvcc[pos] << 8) | hvcc[pos + 1];
+        pos += 2;
+        for (int n = 0; n < num_nalus && pos + 2 <= hvcc_len; n++) {
+            int nalu_len = (hvcc[pos] << 8) | hvcc[pos + 1];
+            pos += 2;
+            if (pos + nalu_len > hvcc_len) break;
 
-// Convenience: write RGBA pixels into a provided buffer (handles 8 and 10-bit)
-// This runs in WASM so it's reasonably fast.
-EMSCRIPTEN_KEEPALIVE
-int decoder_yuv_to_rgba(uint8_t* rgba_out) {
-    if (!current_img) return -1;
+            de265_error err = de265_push_data(ctx, start_code, 4, 0, NULL);
+            if (err == DE265_OK)
+                err = de265_push_data(ctx, hvcc + pos, nalu_len, 0, NULL);
+            if (err == DE265_OK)
+                de265_push_end_of_NAL(ctx);
 
-    int w = de265_get_image_width(current_img, 0);
-    int h = de265_get_image_height(current_img, 0);
-    int bpp = de265_get_bits_per_pixel(current_img, 0);
-    enum de265_chroma chroma = de265_get_chroma_format(current_img);
-
-    int y_stride, u_stride, v_stride;
-    const uint8_t* y_plane = de265_get_image_plane(current_img, 0, &y_stride);
-    const uint8_t* u_plane = de265_get_image_plane(current_img, 1, &u_stride);
-    const uint8_t* v_plane = de265_get_image_plane(current_img, 2, &v_stride);
-
-    if (!y_plane || !u_plane || !v_plane) return -1;
-
-    // Chroma subsampling factors
-    int chroma_w_shift = (chroma == de265_chroma_444) ? 0 : 1;
-    int chroma_h_shift = (chroma == de265_chroma_420) ? 1 : 0;
-    int bit_shift = bpp - 8;
-
-    for (int row = 0; row < h; row++) {
-        int crow = row >> chroma_h_shift;
-        for (int col = 0; col < w; col++) {
-            int ccol = col >> chroma_w_shift;
-            int Y, U, V;
-
-            if (bpp > 8) {
-                // 10/12-bit: samples stored as uint16_t
-                Y = ((const uint16_t*)(y_plane + row * y_stride))[col] >> bit_shift;
-                U = ((const uint16_t*)(u_plane + crow * u_stride))[ccol] >> bit_shift;
-                V = ((const uint16_t*)(v_plane + crow * v_stride))[ccol] >> bit_shift;
-            } else {
-                Y = y_plane[row * y_stride + col];
-                U = u_plane[crow * u_stride + ccol];
-                V = v_plane[crow * v_stride + ccol];
-            }
-
-            // BT.601 YUV -> RGB
-            int C = Y - 16;
-            int D = U - 128;
-            int E = V - 128;
-            int R = (298 * C + 409 * E + 128) >> 8;
-            int G = (298 * C - 100 * D - 208 * E + 128) >> 8;
-            int B = (298 * C + 516 * D + 128) >> 8;
-
-            if (R < 0) R = 0; if (R > 255) R = 255;
-            if (G < 0) G = 0; if (G > 255) G = 255;
-            if (B < 0) B = 0; if (B > 255) B = 255;
-
-            int idx = (row * w + col) * 4;
-            rgba_out[idx + 0] = R;
-            rgba_out[idx + 1] = G;
-            rgba_out[idx + 2] = B;
-            rgba_out[idx + 3] = 255;
+            nal_count++;
+            pos += nalu_len;
         }
     }
-    return 0;
+
+    // Process parameter sets
+    int more = 1;
+    while (more > 0) {
+        de265_error err = de265_decode(ctx, &more);
+        if (err == DE265_ERROR_WAITING_FOR_INPUT_DATA) break;
+        if (err != DE265_OK) break;
+    }
+
+    return nal_count;
 }
 
 #ifdef __cplusplus

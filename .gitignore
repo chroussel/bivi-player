@@ -6,3 +6,5 @@
 /www/data/*.mp4
 /www/data/*.mkv
 /vendor
+www/codec-*.js
+www/codec-*.wasm

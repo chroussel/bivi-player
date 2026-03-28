@@ -117,25 +117,34 @@ impl FrameBuffer {
                 }
             }
         } else {
-            let mut row_buf = vec![0u8; w.max(cw)];
-            for r in 0..h {
-                let offset = (y_ptr + r as u32 * y_stride) as u32;
+            // 8-bit: bulk copy when stride == width, row-by-row otherwise
+            if y_stride == w as u32 {
                 plane_data
-                    .slice(offset, offset + w as u32)
-                    .copy_to(&mut row_buf[..w]);
-                y_out[r * w..r * w + w].copy_from_slice(&row_buf[..w]);
-            }
-            for r in 0..ch {
-                let u_off = (u_ptr + r as u32 * u_stride) as u32;
-                let v_off = (v_ptr + r as u32 * v_stride) as u32;
+                    .slice(y_ptr, y_ptr + (w * h) as u32)
+                    .copy_to(&mut y_out);
                 plane_data
-                    .slice(u_off, u_off + cw as u32)
-                    .copy_to(&mut row_buf[..cw]);
-                u_out[r * cw..r * cw + cw].copy_from_slice(&row_buf[..cw]);
+                    .slice(u_ptr, u_ptr + (cw * ch) as u32)
+                    .copy_to(&mut u_out);
                 plane_data
-                    .slice(v_off, v_off + cw as u32)
-                    .copy_to(&mut row_buf[..cw]);
-                v_out[r * cw..r * cw + cw].copy_from_slice(&row_buf[..cw]);
+                    .slice(v_ptr, v_ptr + (cw * ch) as u32)
+                    .copy_to(&mut v_out);
+            } else {
+                for r in 0..h {
+                    let offset = y_ptr + r as u32 * y_stride;
+                    plane_data
+                        .slice(offset, offset + w as u32)
+                        .copy_to(&mut y_out[r * w..(r + 1) * w]);
+                }
+                for r in 0..ch {
+                    let u_off = u_ptr + r as u32 * u_stride;
+                    let v_off = v_ptr + r as u32 * v_stride;
+                    plane_data
+                        .slice(u_off, u_off + cw as u32)
+                        .copy_to(&mut u_out[r * cw..(r + 1) * cw]);
+                    plane_data
+                        .slice(v_off, v_off + cw as u32)
+                        .copy_to(&mut v_out[r * cw..(r + 1) * cw]);
+                }
             }
         }
 
