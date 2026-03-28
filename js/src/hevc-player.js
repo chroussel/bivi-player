@@ -116,14 +116,47 @@ export class HevcPlayerElement extends HTMLElement {
     }
 
     async streamUrl(url) {
-        // MKV doesn't support Range-based streaming — fall back to full fetch
-        if (url.match(/\.mkv(\?|$)/i)) {
-            return this.loadUrl(url);
-        }
         await this._ensureCore();
         try {
-            await this._core.loadStream(url);
+            if (url.match(/\.mkv(\?|$)/i)) {
+                await this._streamMkv(url);
+            } else {
+                await this._core.loadStream(url);
+            }
         } catch (e) { this._el.status.textContent = `Error: ${e.message}`; console.error(e); }
+    }
+
+    async _streamMkv(url) {
+        // Progressive download with progress reporting
+        const resp = await fetch(url);
+        if (!resp.ok) throw new Error(`Fetch failed: ${resp.status}`);
+        const total = parseInt(resp.headers.get('Content-Length') || '0');
+        const reader = resp.body.getReader();
+        const chunks = [];
+        let received = 0;
+
+        while (true) {
+            const { done, value } = await reader.read();
+            if (done) break;
+            chunks.push(value);
+            received += value.length;
+            if (total) {
+                const pct = Math.round(received / total * 100);
+                this._el.status.textContent = `Downloading MKV... ${pct}% (${(received / 1048576).toFixed(1)}MB)`;
+            } else {
+                this._el.status.textContent = `Downloading MKV... ${(received / 1048576).toFixed(1)}MB`;
+            }
+        }
+
+        // Combine chunks
+        const data = new Uint8Array(received);
+        let offset = 0;
+        for (const chunk of chunks) {
+            data.set(chunk, offset);
+            offset += chunk.length;
+        }
+
+        await this._core.load(data.buffer);
     }
 
     play() { this._core?.play(); }
