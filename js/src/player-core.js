@@ -84,6 +84,7 @@ export class HEVCPlayerCore {
 
         this._setStatus('Parsing metadata...');
         this.demuxer = new DemuxerInterface(new StreamingDemuxer(this.streamLoader.moovData));
+        this.demuxer.stillDownloading = true;
         this.isStreaming = true;
 
         this.canvas.width = this.demuxer.width();
@@ -146,27 +147,27 @@ export class HEVCPlayerCore {
         await this._postInit();
 
         this._mkvDownloading = true;
-        this._downloadMkvBackground();
     }
 
-    async _downloadMkvBackground() {
-        while (this._mkvFetchOffset < this.streamLoader.fileSize) {
-            const end = Math.min(this._mkvFetchOffset + 1024 * 1024, this.streamLoader.fileSize);
-            const chunk = await this.streamLoader.fetchRange(this._mkvFetchOffset, end);
-            this._mkvFetchOffset = end;
-            this.demuxer.pushData(chunk);
-            this.totalSamples = this.demuxer.sampleCount();
-            this.totalAudioSamples = this.demuxer.audioSampleCount();
-        }
-        this.demuxer.finish();
+    async _downloadMkvChunk() {
+        if (this._mkvFetchOffset >= this.streamLoader.fileSize) return false;
+        const end = Math.min(this._mkvFetchOffset + 1024 * 1024, this.streamLoader.fileSize);
+        const chunk = await this.streamLoader.fetchRange(this._mkvFetchOffset, end);
+        this._mkvFetchOffset = end;
+        this.demuxer.pushData(chunk);
         this.totalSamples = this.demuxer.sampleCount();
         this.totalAudioSamples = this.demuxer.audioSampleCount();
-        this._mkvDownloading = false;
-        this.demuxer.stillDownloading = false;
 
-        if (this.demuxer.hasSubtitles()) {
-            this.loadSubtitles();
+        if (this._mkvFetchOffset >= this.streamLoader.fileSize) {
+            this.demuxer.finish();
+            this.totalSamples = this.demuxer.sampleCount();
+            this.totalAudioSamples = this.demuxer.audioSampleCount();
+            this._mkvDownloading = false;
+            this.demuxer.stillDownloading = false;
+            if (this.demuxer.hasSubtitles()) this.loadSubtitles();
+            return false;
         }
+        return true;
     }
 
     async _initDecoder() {
@@ -386,11 +387,11 @@ export class HEVCPlayerCore {
         this.scheduleAudio(elapsedUs);
         this.updateSubtitles(elapsedUs);
 
-        // Streaming: fetch next chunk when buffer runs low
-        if (this.isStreaming && !this._fetchingData) {
-            const bufferedAhead = this._lastFetchedSample - this.nextSample;
-            if (bufferedAhead < 240 && this._lastFetchedSample < this.totalSamples) {
-                this.bufferAhead(this._lastFetchedSample);
+        // Buffer ahead — unified for MP4 Range streaming + MKV progressive
+        if (!this._fetchingData && this.demuxer.stillDownloading) {
+            const bufferedFrames = this.totalSamples - this.nextSample;
+            if (bufferedFrames < 240) { // ~10s at 24fps
+                this._bufferMore();
             }
         }
 
@@ -484,8 +485,8 @@ export class HEVCPlayerCore {
         this.worker.postMessage({ type: 'reset', config });
 
         // Buffer if streaming
-        if (this.isStreaming) {
-            this.bufferAhead(this.nextSample);
+        if (this.demuxer.stillDownloading) {
+            this._bufferMore();
         }
     }
 
@@ -518,6 +519,23 @@ export class HEVCPlayerCore {
         }
         this.feedWorker();
         requestAnimationFrame(() => this._seekDecodeCheck());
+    }
+
+    async _bufferMore() {
+        if (this._fetchingData) return;
+        this._fetchingData = true;
+        try {
+            if (this._mkvDownloading) {
+                // MKV: fetch next 1MB chunk
+                await this._downloadMkvChunk();
+            } else if (this.isStreaming) {
+                // MP4: fetch next 1MB of sample data
+                const nextIdx = await this.streamLoader.fetchChunk(this.demuxer._inner, this._lastFetchedSample);
+                this._lastFetchedSample = Math.max(this._lastFetchedSample, nextIdx);
+            }
+        } finally {
+            this._fetchingData = false;
+        }
     }
 
     async bufferAhead(fromVideoSample) {
